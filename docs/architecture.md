@@ -34,15 +34,14 @@
 
 现有系统由 4 个独立仓库组成：
 
-| 仓库                | 职责                    | 技术栈                       | 数据形式                        |
-| ------------------- | ----------------------- | ---------------------------- | ------------------------------- |
-| `spottery_pro`      | 主平台（前后端+数据库） | FastAPI + React + PostgreSQL | 已有 17 张竞彩表（约 380 万行） |
-| `crawler`           | Sofascore 爬虫          | TS + Playwright              | JSON 文件（约 8.8 万）          |
-| `spottery/scrapers` | 竞彩爬虫                | TS + Puppeteer               | JSON 文件（约 7 万）            |
-| `titan007_pro`      | 球探爬虫                | Python + Playwright          | JSON 文件（约 47 万）           |
+| 仓库 | 职责 | 技术栈 | 数据形式 |
+|---|---|---|---|
+| `spottery_pro` | 主平台（前后端+数据库） | FastAPI + React + PostgreSQL | 已有 17 张竞彩表（约 380 万行） |
+| `crawler` | Sofascore 爬虫 | TS + Playwright | JSON 文件（约 8.8 万） |
+| `spottery/scrapers` | 竞彩爬虫 | TS + Puppeteer | JSON 文件（约 7 万） |
+| `titan007_pro` | 球探爬虫 | Python + Playwright | JSON 文件（约 47 万） |
 
 当前问题：
-
 - 三个爬虫各自把数据落盘为 JSON 文件，主平台通过**硬编码绝对路径**（`config.py` 里的 `D:\data\...\scrapers\data\jingcai`）去读，跨仓库文件耦合脆弱。
 - 主平台只接了竞彩一个数据源，Sofascore / 球探数据未接入。
 - 数据无法跨源统一查询、对齐（球队/联赛跨源映射只有手工维护的 Excel/JSON，未入数据库）。
@@ -60,16 +59,16 @@
 
 ### 1.3 关键决策（已确认）
 
-| 决策点       | 结论                                                                       |
-| ------------ | -------------------------------------------------------------------------- |
-| 仓库组织     | 合并为 **Monorepo**（四个仓库并入 `spottery-master`）                      |
-| 数据库拓扑   | **单 PG 容器，4 个 database**（spottery / sofascore / jingcai / titan007） |
-| 爬虫技术栈   | **保持各自现有技术栈，不统一**（详见第十六章）                             |
-| 爬虫写库方式 | **双写过渡**（PG + JSON 并行，全量对比验证后再关 JSON）                    |
-| 聚合库定位   | 只存**聚合/计算结果**，不冗余源库明细                                      |
-| 容器拆分     | 三个爬虫**各自独立容器**，暂不合并                                         |
-| 缓存         | **第一版不加 Redis**，聚合库 + PG 索引作为唯一存储层                       |
-| 映射表       | **JSONB 数组方案**，人工维护后上传，可扩展新数据源                         |
+| 决策点 | 结论 |
+|---|---|
+| 仓库组织 | 合并为 **Monorepo**（四个仓库并入 `spottery-master`） |
+| 数据库拓扑 | **单 PG 容器，4 个 database**（spottery / sofascore / jingcai / titan007） |
+| 爬虫技术栈 | **保持各自现有技术栈，不统一**（详见第十六章） |
+| 爬虫写库方式 | **双写过渡**（PG + JSON 并行，全量对比验证后再关 JSON） |
+| 聚合库定位 | 只存**聚合/计算结果**，不冗余源库明细 |
+| 容器拆分 | 三个爬虫**各自独立容器**，暂不合并 |
+| 缓存 | **第一版不加 Redis**，聚合库 + PG 索引作为唯一存储层 |
+| 映射表 | **JSONB 数组方案**，人工维护后上传，可扩展新数据源 |
 
 ---
 
@@ -171,7 +170,6 @@
 ```
 
 **数据流核心规则：**
-
 1. 爬虫**只写自己的源库**，不读其他库。
 2. 后端**只读三个源库**（只读事务），**读写平台聚合库**。
 3. 聚合引擎把跨源计算结果写入聚合库，前端只读聚合库。
@@ -298,19 +296,17 @@ spottery-master/
 
 最终 **6 个容器**：
 
-| #   | 容器                | 镜像                                | 职责                      | 端口 |
-| --- | ------------------- | ----------------------------------- | ------------------------- | ---- |
-| 1   | `db`                | postgres:18                         | 单实例 4 库               | 5432 |
-| 2   | `crawler-sofascore` | node:22 + Playwright + Chromium     | Sofascore 爬虫            | 3001 |
-| 3   | `crawler-jingcai`   | node:22 + Puppeteer + Chromium      | 竞彩爬虫                  | 3002 |
-| 4   | `crawler-titan007`  | python:3.12 + Playwright + Chromium | 球探爬虫                  | 3003 |
-| 5   | `api`               | python:3.12 + FastAPI               | 后端（读源库 + 写聚合库） | 8000 |
-| 6   | `frontend`          | node:22 + Vite                      | 前端                      | 5173 |
+| # | 容器 | 镜像 | 职责 | 端口 |
+|---|---|---|---|---|
+| 1 | `db` | postgres:18 | 单实例 4 库 | 5432 |
+| 2 | `crawler-sofascore` | node:22 + Playwright + Chromium | Sofascore 爬虫 | 3001 |
+| 3 | `crawler-jingcai` | node:22 + Puppeteer + Chromium | 竞彩爬虫 | 3002 |
+| 4 | `crawler-titan007` | python:3.12 + Playwright + Chromium | 球探爬虫 | 3003 |
+| 5 | `api` | python:3.12 + FastAPI | 后端（读源库 + 写聚合库） | 8000 |
+| 6 | `frontend` | node:22 + Vite | 前端 | 5173 |
 
 **关于浏览器体积**：
-
-- 共 **6 个容器**，其中 3 个爬虫容器各自内置 Chromium（镜像较大，约 500~600MB/个）；db / api / frontend 三个容器镜像很小（不含浏览器）。
-- 全部镜像磁盘占用总计约 2.5~3GB。
+- 三个爬虫容器各自内置 Chromium（镜像约 500~600MB/个），6 个容器总计约 2.5~3GB。
 - 云服务器典型 40GB 系统盘足够。
 - 后期优化方向：合并 TS 爬虫共享 Chromium 基础镜像，或引入共享浏览器池。当前**独立容器**以保证稳定性（一个爬虫崩溃不影响其他）。
 
@@ -330,14 +326,14 @@ PostgreSQL 18（容器 spottery-pg，端口 5432）
 
 ### 6.2 用户与权限隔离
 
-| 角色                | 可访问库                       | 权限                                                        |
-| ------------------- | ------------------------------ | ----------------------------------------------------------- |
-| `crawler_sofascore` | sofascore                      | 读写                                                        |
-| `crawler_jingcai`   | jingcai                        | 读写                                                        |
-| `crawler_titan007`  | titan007                       | 读写                                                        |
-| `api_service`       | spottery                       | 读写                                                        |
-|                     | sofascore / jingcai / titan007 | **只读**（连接时 `SET default_transaction_read_only = on`） |
-| `postgres`          | 全部                           | 超级管理员（初始化）                                        |
+| 角色 | 可访问库 | 权限 |
+|---|---|---|
+| `crawler_sofascore` | sofascore | 读写 |
+| `crawler_jingcai` | jingcai | 读写 |
+| `crawler_titan007` | titan007 | 读写 |
+| `api_service` | spottery | 读写 |
+| | sofascore / jingcai / titan007 | **只读**（连接时 `SET default_transaction_read_only = on`） |
+| `postgres` | 全部 | 超级管理员（初始化） |
 
 ### 6.3 备份策略
 
@@ -371,325 +367,87 @@ docker cp spottery-pg:/tmp/sofascore.dump ./backup/sofascore-<日期>.dump
 
 ### 7.1 Sofascore 库
 
-基于 `schedules_v2/`（新版赛程）与 `details/`（比赛详情）的真实 JSON 结构设计。共 **11 张表**。
-
-**建表原则**：
-- 有明确实体、需要筛选/聚合的数据（事件、阵容、统计）→ **拆行存关系表**。
-- 小结构、整体读、不筛选的数据（赛前排位、投票）→ JSONB。
-- 固定字段的指标快照（球队赛季统计）→ **固定列宽表**。
-- 源库只存 Sofascore 源 ID，不存跨源统一 ID（跨源对齐在聚合库 mapping 层做）。
-
 ```sql
 -- ============================================
--- sofascore 库：Sofascore 爬虫数据（11 张表）
+-- sofascore 库：Sofascore 爬虫数据
 -- ============================================
 
--- ① 联赛表（来自赛程 JSON 顶层 league 对象）
-CREATE TABLE leagues (
-    league_id       INTEGER PRIMARY KEY,          -- unique-tournament ID
-    name            TEXT,                         -- 英文联赛名
-    short_name      TEXT,                         -- 中文简称
-    slug            TEXT,                         -- URL slug
-    country         TEXT,                         -- 国家
-    scraped_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now()
-);
-
--- ② 赛季表
-CREATE TABLE seasons (
-    season_id       INTEGER PRIMARY KEY,          -- Sofascore season ID
-    league_id       INTEGER NOT NULL REFERENCES leagues(league_id),
-    season_key      TEXT NOT NULL,                -- 如 "16/17" / "2024"
-    UNIQUE (league_id, season_key)
-);
-
--- ③ 球队表（Sofascore 源球队，只存源 ID）
-CREATE TABLE teams (
-    team_id         INTEGER PRIMARY KEY,          -- Sofascore 球队 ID
-    name            TEXT,                         -- 球队英文名
-    country         TEXT,                         -- 国家（若有）
-    scraped_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now()
-);
-
--- ④ 赛程主表（来自 schedules_v2 的 matches 数组）
-CREATE TABLE matches (
+-- 赛程表
+CREATE TABLE match_schedules (
     match_id        INTEGER PRIMARY KEY,          -- Sofascore event ID
-    league_id       INTEGER NOT NULL REFERENCES leagues(league_id),
-    season_id       INTEGER NOT NULL REFERENCES seasons(season_id),
-    season_key      TEXT NOT NULL,                -- 冗余赛季标识，查询方便
-    slug            TEXT,                         -- 比赛 slug
-    home_team_id    INTEGER NOT NULL REFERENCES teams(team_id),
-    away_team_id    INTEGER NOT NULL REFERENCES teams(team_id),
-    home_score      INTEGER,                      -- 主队比分
-    away_score      INTEGER,                      -- 客队比分
-    round_num       INTEGER,                      -- 轮次
-    round_slug      TEXT,                         -- 轮次 slug
-    round_prefix    TEXT,                         -- 轮次前缀
-    kickoff_time    TIMESTAMPTZ NOT NULL,         -- 开赛时间
+    league_id       INTEGER NOT NULL,             -- unique-tournament ID
+    season_id       INTEGER NOT NULL,
+    season_key      TEXT,                         -- 如 "24/25" / "2024"
+    slug            TEXT,
+    home_team_id    INTEGER,
+    away_team_id    INTEGER,
+    home_score      INTEGER,
+    away_score      INTEGER,
+    round_num       INTEGER,
+    round_slug      TEXT,
+    round_prefix    TEXT,
+    kickoff_time    TIMESTAMPTZ NOT NULL,
     status          TEXT NOT NULL,                -- finished / postponed / inprogress...
-    tournament_name TEXT,                         -- 赛事名称
+    tournament_name TEXT,
+    data_raw        JSONB,                        -- 原始 API 响应（灾备）
     scraped_at      TIMESTAMPTZ DEFAULT now(),
     updated_at      TIMESTAMPTZ DEFAULT now(),
     UNIQUE (league_id, season_id, match_id)
 );
-CREATE INDEX idx_matches_kickoff ON matches (kickoff_time);
-CREATE INDEX idx_matches_league_season ON matches (league_id, season_id);
-CREATE INDEX idx_matches_team ON matches (home_team_id, away_team_id);
+CREATE INDEX idx_schedules_kickoff ON match_schedules (kickoff_time);
+CREATE INDEX idx_schedules_league_season ON match_schedules (league_id, season_id);
 
--- ⑤ 赛程原始文件表（按 联赛×赛季 一份，存整份原始响应灾备）
-CREATE TABLE schedule_raw_files (
-    league_id       INTEGER NOT NULL,
-    season_key      TEXT NOT NULL,
-    season_id       INTEGER,
-    raw             JSONB NOT NULL,               -- 整份赛程 JSON（含所有比赛）
-    scraped_at      TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (league_id, season_key)
-);
-
--- ⑥ 比赛详情单值表（1:1 matches；冗余比分/状态，单表即得详情）
+-- 比赛详情表（1:1 match_schedules）
 CREATE TABLE match_details (
-    match_id        INTEGER PRIMARY KEY REFERENCES matches(match_id),
+    match_id        INTEGER PRIMARY KEY REFERENCES match_schedules(match_id),
     season_id       INTEGER,
-    referee         TEXT,                         -- 裁判
-    venue           TEXT,                         -- 球场
-    attendance      INTEGER,                      -- 上座人数
-    -- 冗余比分/状态（详情 JSON 顶层本就有，避免查详情还要 JOIN 赛程）
-    home_score      INTEGER,
-    away_score      INTEGER,
-    status          TEXT,
-    pregame_form    JSONB,                        -- 赛前排位/近期状态（小结构）
-    votes           JSONB,                        -- 赛前投票（小结构）
-    data_raw        JSONB,                        -- 原始详情响应（灾备）
-    scraped_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now()
+    referee         TEXT,
+    venue           TEXT,
+    attendance      INTEGER,
+    pregame_form    JSONB,                        -- 赛前排位 + 近期状态
+    votes           JSONB,                        -- 赛前投票
+    lineups         JSONB,                        -- 首发/替补/伤病
+    statistics      JSONB,                        -- 技术统计（按半场）
+    incidents       JSONB,                        -- 比赛事件
+    data_raw        JSONB,                        -- 原始 API 响应（灾备）
+    scraped_at      TIMESTAMPTZ DEFAULT now()
 );
 
--- ⑦ 阵容球员表（来自 lineups.home/away.players[]，拆行）
-CREATE TABLE match_players (
-    id              BIGSERIAL PRIMARY KEY,
-    match_id        INTEGER NOT NULL REFERENCES matches(match_id),
-    team_type       TEXT NOT NULL,                -- home / away
-    player_id       INTEGER NOT NULL,             -- 球员 Sofascore ID
-    player_name     TEXT NOT NULL,                -- 球员名
-    shirt_number    INTEGER,                      -- 球衣号
-    position        TEXT,                         -- 位置代码 (G/D/M/F)
-    substitute      BOOLEAN DEFAULT FALSE,        -- 是否替补
-    rating          FLOAT,                        -- 评分
-    minutes_played  INTEGER,                      -- 出场分钟
-    total_pass      INTEGER,                      -- 传球总数
-    accurate_pass   INTEGER,                      -- 传球成功数
-    total_shots     INTEGER,                      -- 射门总数
-    saves           INTEGER,                      -- 扑救数
-    UNIQUE (match_id, team_type, player_id)
-);
-CREATE INDEX idx_players_match ON match_players (match_id);
-
--- ⑧ 伤停球员表（来自 lineups.home/away.missingPlayers[]，拆行）
-CREATE TABLE match_missing_players (
-    id              BIGSERIAL PRIMARY KEY,
-    match_id        INTEGER NOT NULL REFERENCES matches(match_id),
-    team_type       TEXT NOT NULL,                -- home / away
-    player_id       INTEGER NOT NULL,             -- 球员 ID
-    player_name     TEXT NOT NULL,                -- 球员名
-    missing_type    TEXT,                         -- 伤停类型（如 "missing"）
-    description     TEXT,                         -- 描述（如 "ACL Knee Injury"）
-    expected_end_date TIMESTAMPTZ,                -- 预计复出时间
-    UNIQUE (match_id, team_type, player_id)
-);
-
--- ⑨ 技术统计表（来自 statistics[]，拆行：period+group+stat_name 一行）
-CREATE TABLE match_statistics (
-    id              BIGSERIAL PRIMARY KEY,
-    match_id        INTEGER NOT NULL REFERENCES matches(match_id),
-    period          TEXT NOT NULL,                -- ALL / 1H / 2H
-    group_name      TEXT NOT NULL,                -- 统计分组（Match overview / Shots...）
-    stat_name       TEXT NOT NULL,                -- 指标名（Ball possession / Total shots...）
-    home_display    TEXT,                         -- 主队显示值（如 "47%"）
-    away_display    TEXT,                         -- 客队显示值
-    home_value      NUMERIC,                      -- 主队数值
-    away_value      NUMERIC,                      -- 客队数值
-    UNIQUE (match_id, period, group_name, stat_name)
-);
-CREATE INDEX idx_statistics_match ON match_statistics (match_id);
-
--- ⑩ 比赛事件表（来自 incidents[]，拆行）
-CREATE TABLE match_incidents (
-    id              BIGSERIAL PRIMARY KEY,
-    match_id        INTEGER NOT NULL REFERENCES matches(match_id),
-    time            INTEGER,                      -- 事件时间（分钟）
-    incident_type   TEXT,                         -- goal / substitution / period / redcard...
-    incident_class  TEXT,                         -- regular / penalty / own_goal...
-    is_home         BOOLEAN,                      -- 是否主队方
-    player_id       INTEGER,                      -- 相关球员 ID
-    player_name     TEXT,                         -- 相关球员名
-    assist_id       INTEGER,                      -- 助攻球员 ID
-    assist_name     TEXT,                         -- 助攻球员名
-    replacement_id  INTEGER,                      -- 换上的球员 ID（换人事件）
-    replacement_name TEXT,                        -- 换上的球员名
-    home_score      INTEGER,                      -- 事件时主队比分
-    away_score      INTEGER,                      -- 事件时客队比分
-    reason          TEXT,                         -- 原因（红牌/取消等）
-    text            TEXT                          -- 文本（如 "FT" / "HT"）
-);
-CREATE INDEX idx_incidents_match ON match_incidents (match_id);
-CREATE INDEX idx_incidents_type ON match_incidents (incident_type);
-
--- ⑪ 球队赛季统计表（111 列宽表：107 个统计指标 + 4 个元数据列）
---    注：原 JSON statistics 对象共 111 个字段，其中 4 个为元数据
---    （id / matches / awardedMatches / statisticsType），其余 107 个为统计指标。
---    统计指标均为固定字段，采用固定列宽表（类型安全、可索引、可直接聚合）。
+-- 球队赛季统计
 CREATE TABLE team_season_stats (
-    team_id         INTEGER NOT NULL REFERENCES teams(team_id),
-    league_id       INTEGER NOT NULL REFERENCES leagues(league_id),
-    season_id       INTEGER NOT NULL REFERENCES seasons(season_id),
-    -- ===== 元数据 =====
-    stats_id        INTEGER,                      -- JSON id
-    matches_cnt     INTEGER,                      -- JSON matches（场次数）
-    awarded_matches INTEGER,                      -- JSON awardedMatches（获赠场次）
-    statistics_type TEXT,                         -- JSON statisticsType
-    -- ===== 进攻指标 =====
-    goals_scored    INTEGER,                      -- 进球数
-    goals_conceded  INTEGER,                      -- 失球数
-    own_goals       INTEGER,                      -- 乌龙球
-    assists         INTEGER,                      -- 助攻
-    shots           INTEGER,                      -- 射门
-    penalty_goals   INTEGER,                      -- 点球进球
-    penalties_taken INTEGER,                      -- 点球次数
-    free_kick_goals INTEGER,                      -- 任意球进球
-    free_kick_shots INTEGER,                      -- 任意球射门
-    goals_inside_box INTEGER,                     -- 禁区内进球
-    goals_outside_box INTEGER,                    -- 禁区外进球
-    shots_inside_box INTEGER,                     -- 禁区内射门
-    shots_outside_box INTEGER,                    -- 禁区外射门
-    headed_goals    INTEGER,                      -- 头球进球
-    left_foot_goals INTEGER,                      -- 左脚进球
-    right_foot_goals INTEGER,                     -- 右脚进球
-    big_chances     INTEGER,                      -- 重大机会
-    big_chances_created INTEGER,                  -- 创造重大机会
-    big_chances_missed INTEGER,                   -- 错失重大机会
-    shots_on_target INTEGER,                      -- 射正
-    shots_off_target INTEGER,                     -- 射偏
-    blocked_scoring_attempt INTEGER,              -- 被阻挡射门
-    successful_dribbles INTEGER,                  -- 成功过人
-    dribble_attempts INTEGER,                     -- 过人尝试
-    corners         INTEGER,                      -- 角球
-    hit_woodwork    INTEGER,                      -- 击中门框
-    fast_breaks     INTEGER,                      -- 快速反击
-    fast_break_goals INTEGER,                     -- 反击进球
-    fast_break_shots INTEGER,                     -- 反击射门
-    -- ===== 传球/控球 =====
-    average_ball_possession NUMERIC,              -- 场均控球率
-    total_passes    INTEGER,                      -- 传球总数
-    accurate_passes INTEGER,                      -- 传球成功数
-    accurate_passes_percentage NUMERIC,           -- 传球成功率(%)
-    total_own_half_passes INTEGER,                -- 后场传球总数
-    accurate_own_half_passes INTEGER,             -- 后场传球成功
-    accurate_own_half_passes_percentage NUMERIC,  -- 后场传球成功率(%)
-    total_opposition_half_passes INTEGER,         -- 前场传球总数
-    accurate_opposition_half_passes INTEGER,      -- 前场传球成功
-    accurate_opposition_half_passes_percentage NUMERIC, -- 前场传球成功率(%)
-    total_long_balls INTEGER,                     -- 长传总数
-    accurate_long_balls INTEGER,                  -- 长传成功
-    accurate_long_balls_percentage NUMERIC,       -- 长传成功率(%)
-    total_crosses   INTEGER,                      -- 传中总数
-    accurate_crosses INTEGER,                     -- 传中成功
-    accurate_crosses_percentage NUMERIC,          -- 传中成功率(%)
-    -- ===== 防守 =====
-    clean_sheets    INTEGER,                      -- 零封场次
-    tackles         INTEGER,                      -- 抢断
-    interceptions   INTEGER,                      -- 拦截
-    saves           INTEGER,                      -- 扑救
-    errors_leading_to_goal INTEGER,               -- 失误导致丢球
-    errors_leading_to_shot INTEGER,               -- 失误导致射门
-    penalties_commited INTEGER,                   -- 送点
-    penalty_goals_conceded INTEGER,               -- 被判点球
-    clearances      INTEGER,                      -- 解围
-    clearances_off_line INTEGER,                  -- 门线解围
-    last_man_tackles INTEGER,                     -- 最后一人抢断
-    total_duels     INTEGER,                      -- 对抗总数
-    duels_won       INTEGER,                      -- 对抗获胜
-    duels_won_percentage NUMERIC,                 -- 对抗胜率(%)
-    total_ground_duels INTEGER,                   -- 地面对抗总数
-    ground_duels_won INTEGER,                     -- 地面对抗获胜
-    ground_duels_won_percentage NUMERIC,          -- 地面对抗胜率(%)
-    total_aerial_duels INTEGER,                   -- 空中对抗总数
-    aerial_duels_won INTEGER,                     -- 空中对抗获胜
-    aerial_duels_won_percentage NUMERIC,          -- 空中对抗胜率(%)
-    possession_lost INTEGER,                      -- 丢球权次数
-    offsides        INTEGER,                      -- 越位
-    fouls           INTEGER,                      -- 犯规
-    yellow_cards    INTEGER,                      -- 黄牌
-    yellow_red_cards INTEGER,                     -- 两黄变红
-    red_cards       INTEGER,                      -- 红牌
-    avg_rating      NUMERIC,                      -- 平均评分
-    -- ===== 对手指标（Against，衡量防守压力）=====
-    accurate_final_third_passes_against INTEGER,  -- 对手前场传球成功
-    accurate_opposition_half_passes_against INTEGER, -- 对手前场传球成功数
-    accurate_own_half_passes_against INTEGER,     -- 对手后场传球成功数
-    accurate_passes_against INTEGER,              -- 对手传球成功总数
-    big_chances_against INTEGER,                  -- 对手重大机会
-    big_chances_created_against INTEGER,          -- 对手创造重大机会
-    big_chances_missed_against INTEGER,           -- 对手错失重大机会
-    clearances_against INTEGER,                   -- 对手解围
-    corners_against INTEGER,                      -- 对手角球
-    crosses_successful_against INTEGER,           -- 对手传中成功
-    crosses_total_against INTEGER,                -- 对手传中总数
-    dribble_attempts_total_against INTEGER,       -- 对手过人尝试
-    dribble_attempts_won_against INTEGER,         -- 对手过人成功
-    errors_leading_to_goal_against INTEGER,       -- 对手失误导致进球
-    errors_leading_to_shot_against INTEGER,       -- 对手失误导致射门
-    hit_woodwork_against INTEGER,                 -- 对手击中门框
-    interceptions_against INTEGER,                -- 对手拦截
-    key_passes_against INTEGER,                   -- 对手关键传球
-    long_balls_successful_against INTEGER,        -- 对手长传成功
-    long_balls_total_against INTEGER,             -- 对手长传总数
-    offsides_against INTEGER,                     -- 对手越位
-    red_cards_against INTEGER,                    -- 对手红牌
-    shots_against INTEGER,                        -- 对手射门
-    shots_blocked_against INTEGER,                -- 对手射门被阻挡
-    shots_inside_box_against INTEGER,             -- 对手禁区内射门
-    shots_outside_box_against INTEGER,            -- 对手禁区外射门
-    shots_off_target_against INTEGER,             -- 对手射偏
-    shots_on_target_against INTEGER,              -- 对手射正
-    blocked_scoring_attempt_against INTEGER,      -- 对手被阻挡射门
-    tackles_against INTEGER,                      -- 对手抢断
-    total_final_third_passes_against INTEGER,     -- 对手前场传球总数
-    opposition_half_passes_total_against INTEGER, -- 对手前场传球总数
-    own_half_passes_total_against INTEGER,        -- 对手后场传球总数
-    total_passes_against INTEGER,                 -- 对手传球总数
-    yellow_cards_against INTEGER,                 -- 对手黄牌
+    team_id         INTEGER NOT NULL,
+    league_id       INTEGER NOT NULL,
+    season_id       INTEGER NOT NULL,
+    statistics      JSONB NOT NULL,               -- ~115 项指标
+    data_raw        JSONB,
     scraped_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (team_id, league_id, season_id)
 );
 ```
-
-> **统计指标说明**：原 JSON `statistics` 对象共 111 个字段，其中 4 个为元数据（`id` / `matches` / `awardedMatches` / `statisticsType`），107 个为统计指标。上表已全部建模为固定列。字段名的 `_against` 后缀表示"对手在该指标上的表现"，用于衡量防守压力。
 
 ### 7.2 竞彩库
 
 沿用现有 `spottery_pro/backend/app/models/jingcai.py` 的全部 **17 张表结构不变**，迁到 `jingcai` 独立 database：
 
-| 表                        | 行数    | 说明                               |
-| ------------------------- | ------- | ---------------------------------- |
-| `jingcai_matches`         | 76,969  | 竞彩比赛主体                       |
-| `jingcai_odds`            | 349,234 | 赔率汇总（SPF/RQSPF/CRS/TTG/HAFU） |
-| `jingcai_odds_spf`        | 261,485 | 胜平负明细快照                     |
-| `jingcai_odds_rqspf`      | 268,489 | 让球胜平负明细快照                 |
-| `jingcai_odds_crs`        | 139,285 | 比分明细快照                       |
-| `jingcai_odds_ttg`        | 145,285 | 总进球明细快照                     |
-| `jingcai_odds_hafu`       | 158,270 | 半全场明细快照                     |
-| `jingcai_pools`           | 325,588 | 奖池                               |
-| `jingcai_standings`       | 354,042 | 积分榜                             |
-| `jingcai_h2h`             | 421,051 | 历史交锋                           |
-| `jingcai_recent_results`  | 243,271 | 近期赛果                           |
-| `jingcai_fixtures`        | 5,482   | 未来赛程                           |
-| `jingcai_injuries`        | 138,925 | 伤病名单                           |
-| `jingcai_players`         | 381,905 | 球员数据                           |
-| `jingcai_season_features` | 65,896  | 赛季特征                           |
-| `jingcai_teams`           | 2,771   | 球队映射                           |
-| `jingcai_leagues`         | 134     | 联赛映射                           |
+| 表 | 行数 | 说明 |
+|---|---|---|
+| `jingcai_matches` | 76,969 | 竞彩比赛主体 |
+| `jingcai_odds` | 349,234 | 赔率汇总（SPF/RQSPF/CRS/TTG/HAFU） |
+| `jingcai_odds_spf` | 261,485 | 胜平负明细快照 |
+| `jingcai_odds_rqspf` | 268,489 | 让球胜平负明细快照 |
+| `jingcai_odds_crs` | 139,285 | 比分明细快照 |
+| `jingcai_odds_ttg` | 145,285 | 总进球明细快照 |
+| `jingcai_odds_hafu` | 158,270 | 半全场明细快照 |
+| `jingcai_pools` | 325,588 | 奖池 |
+| `jingcai_standings` | 354,042 | 积分榜 |
+| `jingcai_h2h` | 421,051 | 历史交锋 |
+| `jingcai_recent_results` | 243,271 | 近期赛果 |
+| `jingcai_fixtures` | 5,482 | 未来赛程 |
+| `jingcai_injuries` | 138,925 | 伤病名单 |
+| `jingcai_players` | 381,905 | 球员数据 |
+| `jingcai_season_features` | 65,896 | 赛季特征 |
+| `jingcai_teams` | 2,771 | 球队映射 |
+| `jingcai_leagues` | 134 | 联赛映射 |
 
 迁移方式：`pg_dump -t 'jingcai_*'` 从平台库导出 → `pg_restore` 到 `jingcai` 库。
 
@@ -976,8 +734,8 @@ CREATE TABLE aggregated_odds_history (
 
 ### 9.3 平台基础表（沿用现有结构）
 
-- `users` / `predictions` / `briefings` / `teams` / `leagues` / `matches` / `odds_history` / `injuries` / `team_aliases` / `match_source_mappings`（现有 10 张表，结构基本保留，部分表被 unified\_\* 取代后弃用或保留兼容）。
-- 现有 `matches` / `teams` / `leagues` 若与 unified\_\* 语义重叠，规划合并方案（Phase 3 处理）。
+- `users` / `predictions` / `briefings` / `teams` / `leagues` / `matches` / `odds_history` / `injuries` / `team_aliases` / `match_source_mappings`（现有 10 张表，结构基本保留，部分表被 unified_* 取代后弃用或保留兼容）。
+- 现有 `matches` / `teams` / `leagues` 若与 unified_* 语义重叠，规划合并方案（Phase 3 处理）。
 
 ---
 
@@ -1075,15 +833,15 @@ for mod in (sofascore, jingcai, titan007):
 
 ### 11.2 一致性保证（不依赖消息队列）
 
-| 保证项       | 实现方式                                                                                                                                                   |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **幂等写入** | 所有表带 UNIQUE 约束 + `ON CONFLICT DO UPDATE`。同一条记录重抓不产生脏数据。现有 `import_jingcai.py` 已验证此模式。                                        |
-| **增量游标** | 聚合引擎按源记录游标 `(source, last_processed_at)`，只处理新数据，可重入、可对账。                                                                         |
+| 保证项 | 实现方式 |
+|---|---|
+| **幂等写入** | 所有表带 UNIQUE 约束 + `ON CONFLICT DO UPDATE`。同一条记录重抓不产生脏数据。现有 `import_jingcai.py` 已验证此模式。 |
+| **增量游标** | 聚合引擎按源记录游标 `(source, last_processed_at)`，只处理新数据，可重入、可对账。 |
 | **同步更新** | 聚合库更新是「源变 → 通知 → 立即增量重算 → 幂等写」的**同步链**，不是 TTL 过期重建。源库没变，聚合不跑；源库变了，聚合必然跑。不存在「旧缓存未失效」问题。 |
-| **通知兜底** | 通知失败（HTTP 超时/网络抖）时，5 分钟定时扫描兜底，保证最终一致。                                                                                         |
-| **无脏读**   | 后端连源库用只读事务（`default_transaction_read_only=on`）。                                                                                               |
-| **跨源对齐** | 所有跨源 JOIN 先查 cross*source*\* 映射表；未映射的球队/联赛进「待映射」清单，由人工补全。                                                                 |
-| **重算安全** | 聚合任务可随时重跑（幂等），全量重算有单独接口。                                                                                                           |
+| **通知兜底** | 通知失败（HTTP 超时/网络抖）时，5 分钟定时扫描兜底，保证最终一致。 |
+| **无脏读** | 后端连源库用只读事务（`default_transaction_read_only=on`）。 |
+| **跨源对齐** | 所有跨源 JOIN 先查 cross_source_* 映射表；未映射的球队/联赛进「待映射」清单，由人工补全。 |
+| **重算安全** | 聚合任务可随时重跑（幂等），全量重算有单独接口。 |
 
 ### 11.3 游标表
 
@@ -1102,12 +860,12 @@ CREATE TABLE aggregation_cursors (
 
 ### 12.1 分层
 
-| 层级            | 内容                                 | 策略                                                                                                       |
-| --------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| **聚合库**      | 比赛列表、赔率快照、积分榜、预测结果 | 本身就是派生数据存储，预计算 + 同步更新，无需 TTL 淘汰                                                     |
-| **PG 物化视图** | 高频聚合查询（今日比赛 + 赔率汇总）  | 定时刷新（可选，Phase 3 优化）                                                                             |
-| **Redis**       | —                                    | **第一版不加**。后续若前端 QPS 高，再加 Redis 作为聚合库的读副本，失效走「源变→重算→写 PG→写 Redis」同步链 |
-| **前端**        | TanStack Query                       | 已有，按接口特征设置 staleTime                                                                             |
+| 层级 | 内容 | 策略 |
+|---|---|---|
+| **聚合库** | 比赛列表、赔率快照、积分榜、预测结果 | 本身就是派生数据存储，预计算 + 同步更新，无需 TTL 淘汰 |
+| **PG 物化视图** | 高频聚合查询（今日比赛 + 赔率汇总） | 定时刷新（可选，Phase 3 优化） |
+| **Redis** | — | **第一版不加**。后续若前端 QPS 高，再加 Redis 作为聚合库的读副本，失效走「源变→重算→写 PG→写 Redis」同步链 |
+| **前端** | TanStack Query | 已有，按接口特征设置 staleTime |
 
 ### 12.2 为什么第一版不加 Redis
 
@@ -1247,13 +1005,13 @@ volumes:
 
 ### 14.1 环境变量（根 .env）
 
-| 变量                | 说明                                    |
-| ------------------- | --------------------------------------- |
-| `POSTGRES_PASSWORD` | PG 超级用户密码                         |
-| `PG_APP_PASSWORD`   | 应用账号（crawler\_\*/api_service）密码 |
-| `JWT_SECRET_KEY`    | 后端 JWT 密钥                           |
-| `JWT_EXPIRE_DAYS`   | Token 有效期                            |
-| `INTERNAL_API_KEY`  | 爬虫↔后端内部通信令牌                   |
+| 变量 | 说明 |
+|---|---|
+| `POSTGRES_PASSWORD` | PG 超级用户密码 |
+| `PG_APP_PASSWORD` | 应用账号（crawler_*/api_service）密码 |
+| `JWT_SECRET_KEY` | 后端 JWT 密钥 |
+| `JWT_EXPIRE_DAYS` | Token 有效期 |
+| `INTERNAL_API_KEY` | 爬虫↔后端内部通信令牌 |
 
 ### 14.2 开发 vs 生产
 
@@ -1268,13 +1026,13 @@ volumes:
 
 目标：四库 schema 就绪，历史数据入库，聚合引擎骨架可跑。
 
-| 步骤 | 内容                                                                        | 交付物                | 验证点                                  |
-| ---- | --------------------------------------------------------------------------- | --------------------- | --------------------------------------- |
-| 1a   | 创建 4 个库的 DDL（`db/init/`）                                             | DDL 脚本              | 建库成功，权限隔离生效                  |
-| 1b   | 写三个一次性 JSON→PG 导入脚本（`db/migrate/`）                              | migrator 脚本         | 63 万 JSON 全部入库，与 JSON 逐字段对账 |
-| 1c   | 迁移平台库现有 17 张 `jingcai_*` 表到 `jingcai` 库                          | pg_dump/restore       | 行数与源库一致                          |
-| 1d   | 建 `cross_source_leagues` / `cross_source_teams` 表 + 导入现有 mapping JSON | mapping 表数据        | 映射齐全                                |
-| 1e   | 写三个 SourceAdapter + 聚合引擎骨架（unified*\* 对齐 + aggregated*\* 空表） | adapter + engine 代码 | 单元测试通过                            |
+| 步骤 | 内容 | 交付物 | 验证点 |
+|---|---|---|---|
+| 1a | 创建 4 个库的 DDL（`db/init/`） | DDL 脚本 | 建库成功，权限隔离生效 |
+| 1b | 写三个一次性 JSON→PG 导入脚本（`db/migrate/`） | migrator 脚本 | 63 万 JSON 全部入库，与 JSON 逐字段对账 |
+| 1c | 迁移平台库现有 17 张 `jingcai_*` 表到 `jingcai` 库 | pg_dump/restore | 行数与源库一致 |
+| 1d | 建 `cross_source_leagues` / `cross_source_teams` 表 + 导入现有 mapping JSON | mapping 表数据 | 映射齐全 |
+| 1e | 写三个 SourceAdapter + 聚合引擎骨架（unified_* 对齐 + aggregated_* 空表） | adapter + engine 代码 | 单元测试通过 |
 
 > 本阶段不修改任何爬虫采集代码，纯新增。风险低，可随时回退。
 
@@ -1282,27 +1040,27 @@ volumes:
 
 目标：爬虫开始写 PG，聚合引擎上线，前端切数据源。
 
-| 步骤 | 内容                                                     | 验证点                             |
-| ---- | -------------------------------------------------------- | ---------------------------------- |
-| 2a   | 每个爬虫新增 PG writer，**保留 JSON writer**（双写）     | 同一批数据 PG 和 JSON 全量对比一致 |
-| 2b   | 每个爬虫新增 HTTP 控制接口（/crawl /status /health）     | 后端可手动触发                     |
-| 2c   | 聚合引擎上线（apscheduler 定时 + 事件触发）              | 源库更新 → 聚合库同步更新          |
-| 2d   | 后端 source_admin 路由 + mapping upload 接口             | 手工触发/上传可用                  |
-| 2e   | 前端切到聚合库数据源                                     | 页面功能回归                       |
-| 2f   | **全量对比验证**：双写期间对每个 JSON 字段与 PG 记录对比 | 零差异后才进入 Phase 3             |
+| 步骤 | 内容 | 验证点 |
+|---|---|---|
+| 2a | 每个爬虫新增 PG writer，**保留 JSON writer**（双写） | 同一批数据 PG 和 JSON 全量对比一致 |
+| 2b | 每个爬虫新增 HTTP 控制接口（/crawl /status /health） | 后端可手动触发 |
+| 2c | 聚合引擎上线（apscheduler 定时 + 事件触发） | 源库更新 → 聚合库同步更新 |
+| 2d | 后端 source_admin 路由 + mapping upload 接口 | 手工触发/上传可用 |
+| 2e | 前端切到聚合库数据源 | 页面功能回归 |
+| 2f | **全量对比验证**：双写期间对每个 JSON 字段与 PG 记录对比 | 零差异后才进入 Phase 3 |
 
 > 双写期可随时回退（关闭 PG writer 即回 JSON 模式）。
 
 ### Phase 3：清理 + 优化 + 部署
 
-| 步骤 | 内容                                              |
-| ---- | ------------------------------------------------- |
-| 3a   | 确认聚合库稳定 → 关闭双写、移除 JSON writer       |
-| 3b   | 清理/归档旧 JSON 文件（保留一份灾备快照）         |
-| 3c   | 性能优化（物化视图、索引、连接池、PG 参数调优）   |
-| 3d   | 备份策略上线（4 库每日备份）                      |
-| 3e   | 部署到 Linux 云服务器，补充监控（日志、健康检查） |
-| 3f   | 统一旧平台表与 unified\_\* 的兼容/废弃            |
+| 步骤 | 内容 |
+|---|---|
+| 3a | 确认聚合库稳定 → 关闭双写、移除 JSON writer |
+| 3b | 清理/归档旧 JSON 文件（保留一份灾备快照） |
+| 3c | 性能优化（物化视图、索引、连接池、PG 参数调优） |
+| 3d | 备份策略上线（4 库每日备份） |
+| 3e | 部署到 Linux 云服务器，补充监控（日志、健康检查） |
+| 3f | 统一旧平台表与 unified_* 的兼容/废弃 |
 
 ---
 
@@ -1310,11 +1068,11 @@ volumes:
 
 ### 16.1 结论：保持三源各自技术栈，不统一
 
-| 爬虫      | 技术栈              | 反爬核心                             | 不迁移的原因                                                                         |
-| --------- | ------------------- | ------------------------------------ | ------------------------------------------------------------------------------------ |
-| 竞彩      | TS + Puppeteer      | `puppeteer-extra-plugin-stealth`     | JS 生态独有商业级 stealth，Python 无等价方案，换语言后大概率被 sporttery.cn 识别拦截 |
-| titan007  | Python + Playwright | 146 UA + **GBK 解码**                | `bytes.decode("gbk")` 是 Python 标准库能力；TS 需第三方 `iconv-lite`（社区质量不稳） |
-| Sofascore | TS + Playwright     | `page.evaluate(fetch)` + UA/视口轮换 | 与竞彩共享 TS 生态，迁移无收益                                                       |
+| 爬虫 | 技术栈 | 反爬核心 | 不迁移的原因 |
+|---|---|---|---|
+| 竞彩 | TS + Puppeteer | `puppeteer-extra-plugin-stealth` | JS 生态独有商业级 stealth，Python 无等价方案，换语言后大概率被 sporttery.cn 识别拦截 |
+| titan007 | Python + Playwright | 146 UA + **GBK 解码** | `bytes.decode("gbk")` 是 Python 标准库能力；TS 需第三方 `iconv-lite`（社区质量不稳） |
+| Sofascore | TS + Playwright | `page.evaluate(fetch)` + UA/视口轮换 | 与竞彩共享 TS 生态，迁移无收益 |
 
 ### 16.2 改动范围（各爬虫）
 
@@ -1327,11 +1085,11 @@ volumes:
 
 ### 16.3 统一技术栈评估（供参考，不采用）
 
-| 迁移方向                 | 工作量             | 最大风险                               |
-| ------------------------ | ------------------ | -------------------------------------- |
-| TS → Python（Sofascore） | ~14.5 人天         | Playwright 行为差异、反爬升级          |
-| TS → Python（竞彩）      | ~5 人天（1.7k 行） | **stealth 插件无等价物，极可能被识别** |
-| Python → TS（titan007）  | ~8-13 人天         | **GBK 解码、时区处理**                 |
+| 迁移方向 | 工作量 | 最大风险 |
+|---|---|---|
+| TS → Python（Sofascore） | ~14.5 人天 | Playwright 行为差异、反爬升级 |
+| TS → Python（竞彩） | ~5 人天（1.7k 行） | **stealth 插件无等价物，极可能被识别** |
+| Python → TS（titan007） | ~8-13 人天 | **GBK 解码、时区处理** |
 
 结论：迁移风险/收益不成正比，保持现状最稳。
 
@@ -1341,15 +1099,15 @@ volumes:
 
 ### 17.1 风险清单
 
-| #   | 风险                           | 等级 | 缓解                                           |
-| --- | ------------------------------ | ---- | ---------------------------------------------- |
-| 1   | 63 万 JSON 导入耗时/失败       | 高   | 分源分阶段导入，脚本可断点续导，原始 JSON 保留 |
-| 2   | 双写期数据不一致               | 中   | 全量逐字段对比，对比不通过不进入 Phase 3       |
-| 3   | 反爬被目标网站升级检测         | 中   | 保持原反爬实现不重构，减少变化面               |
-| 4   | 映射表人工维护出错导致跨源错配 | 中   | 管线校验 + 交叉验证表人工核对                  |
-| 5   | 聚合引擎计算逻辑错误           | 中   | 单元测试 + 与源数据独立校验                    |
-| 6   | 迁移后磁盘占用                 | 低   | 旧 JSON 清理/归档策略                          |
-| 7   | 浏览器容器资源占用             | 低   | 独立容器可控，后续可优化                       |
+| # | 风险 | 等级 | 缓解 |
+|---|---|---|---|
+| 1 | 63 万 JSON 导入耗时/失败 | 高 | 分源分阶段导入，脚本可断点续导，原始 JSON 保留 |
+| 2 | 双写期数据不一致 | 中 | 全量逐字段对比，对比不通过不进入 Phase 3 |
+| 3 | 反爬被目标网站升级检测 | 中 | 保持原反爬实现不重构，减少变化面 |
+| 4 | 映射表人工维护出错导致跨源错配 | 中 | 管线校验 + 交叉验证表人工核对 |
+| 5 | 聚合引擎计算逻辑错误 | 中 | 单元测试 + 与源数据独立校验 |
+| 6 | 迁移后磁盘占用 | 低 | 旧 JSON 清理/归档策略 |
+| 7 | 浏览器容器资源占用 | 低 | 独立容器可控，后续可优化 |
 
 ### 17.2 开放问题（待评审确认）
 
@@ -1364,19 +1122,19 @@ volumes:
 
 ## 附录 A：数据规模汇总
 
-| 数据源    | JSON 文件数 | 预期入库表数 | 预期行数                              |
-| --------- | ----------- | ------------ | ------------------------------------- |
-| Sofascore | ~88,000     | 3 张         | 赛程 ~2 万行/季 × 10 季               |
-| 竞彩      | ~69,700     | 17 张        | 约 380 万行（已迁移）                 |
-| 球探      | ~470,000    | 3 张         | 赔率 41.5 万 + 分析 5.4 万 + 赛程 387 |
+| 数据源 | JSON 文件数 | 预期入库表数 | 预期行数 |
+|---|---|---|---|
+| Sofascore | ~88,000 | 3 张 | 赛程 ~2 万行/季 × 10 季 |
+| 竞彩 | ~69,700 | 17 张 | 约 380 万行（已迁移） |
+| 球探 | ~470,000 | 3 张 | 赔率 41.5 万 + 分析 5.4 万 + 赛程 387 |
 
 ## 附录 B：关键名词
 
-| 名词          | 含义                                                     |
-| ------------- | -------------------------------------------------------- |
-| 源库          | 爬虫自维护的原始数据库（sofascore / jingcai / titan007） |
-| 聚合库        | 平台库 spottery，存跨源计算/聚合结果                     |
-| SourceAdapter | 数据源适配器，聚合引擎与源库之间的统一接口               |
-| 聚合引擎      | 读源库 → 对齐 → 计算 → 写聚合库的后端模块                |
-| 跨源映射      | cross_source_leagues / cross_source_teams，人工维护      |
-| 双写          | 爬虫同时写 JSON 和 PG，验证一致后停 JSON                 |
+| 名词 | 含义 |
+|---|---|
+| 源库 | 爬虫自维护的原始数据库（sofascore / jingcai / titan007） |
+| 聚合库 | 平台库 spottery，存跨源计算/聚合结果 |
+| SourceAdapter | 数据源适配器，聚合引擎与源库之间的统一接口 |
+| 聚合引擎 | 读源库 → 对齐 → 计算 → 写聚合库的后端模块 |
+| 跨源映射 | cross_source_leagues / cross_source_teams，人工维护 |
+| 双写 | 爬虫同时写 JSON 和 PG，验证一致后停 JSON |
