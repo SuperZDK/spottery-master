@@ -1,8 +1,8 @@
 # Sofascore 源库数据库设计（已定稿部分）
 
 > 本文档记录 **sofascore 库**已确认的数据表设计与数据来源映射，供开发、分析与后续建模参考。
-> 当前定稿范围：**matches + 4 张维度表（leagues/seasons/teams/countries）+ 3 张字典表（status_codes/cup_round_types/round_prefixes）+ details 相关表（players/match_players/match_details/match_votes/match_missing_players）**。
-> 尚未定稿、待讨论：`match_statistics` / `match_incidents` / `team_season_stats`。
+> 当前定稿范围：**matches + 4 张维度表（leagues/seasons/teams/countries）+ 3 张字典表（status_codes/cup_round_types/round_prefixes）+ details 相关表（players/match_players/match_details/match_votes/match_missing_players/match_statistics）**。
+> 尚未定稿、待讨论：`team_season_stats`。`match_incidents` **确认不建表**（详见"十六"）。
 > 所有表均采用**软关联（无 FOREIGN KEY）**，字段来源与转化方式见各表"字段来源与转化"小节。
 
 ---
@@ -607,16 +607,116 @@ CREATE TABLE match_missing_players (
 
 ---
 
-## 十六、已确认但暂不落库的语义（写入文档即可）
+## 十六、match_statistics — 球队比赛统计表
+
+```sql
+CREATE TABLE match_statistics (
+    match_id   BIGINT NOT NULL,           -- 软关联 matches.match_id
+    is_home    BOOLEAN NOT NULL,          -- TRUE=主队 / FALSE=客队
+    period     TEXT NOT NULL,             -- ALL / 1ST / 2ND（ET1/ET2 加时舍弃，竞彩 90 分钟结算）
+    -- ============ 51 指标 value 列（statisticsItems.homeValue/awayValue 按 is_home 取对应侧）============
+    -- 【核心档 15】覆盖 >90%
+    total_shots            INTEGER,       -- Total shots 总射门
+    corner_kicks           INTEGER,       -- Corner kicks 角球
+    shots_on_target        INTEGER,       -- Shots on target 射正
+    shots_off_target       INTEGER,       -- Shots off target 射偏
+    free_kicks             INTEGER,       -- Free kicks 任意球
+    fouls                  INTEGER,       -- Fouls 犯规
+    throw_ins              INTEGER,       -- Throw-ins 界外球
+    goal_kicks             INTEGER,       -- Goal kicks 球门球
+    goalkeeper_saves       INTEGER,       -- Goalkeeper saves 门将扑救
+    ball_possession        NUMERIC,       -- Ball possession 控球率
+    yellow_cards           INTEGER,       -- Yellow cards 黄牌
+    blocked_shots          INTEGER,       -- Blocked shots 封堵射门
+    shots_inside_box       INTEGER,       -- Shots inside box 禁区内射门
+    shots_outside_box      INTEGER,       -- Shots outside box 禁区外射门
+    hit_woodwork           INTEGER,       -- Hit woodwork 击中门框
+    -- 【重要档 20】覆盖 60-90%
+    duels                  INTEGER,       -- Duels 对抗
+    ground_duels           INTEGER,       -- Ground duels 地面对抗
+    offsides               INTEGER,       -- Offsides 越位
+    passes                 INTEGER,       -- Passes 传球
+    accurate_passes        INTEGER,       -- Accurate passes 传球成功
+    aerial_duels           INTEGER,       -- Aerial duels 空中对抗
+    tackles                INTEGER,       -- Tackles 抢断
+    total_tackles          INTEGER,       -- Total tackles 总抢断
+    tackles_won            INTEGER,       -- Tackles won 抢断成功
+    long_balls             INTEGER,       -- Long balls 长传
+    crosses                INTEGER,       -- Crosses 传中
+    dribbles               INTEGER,       -- Dribbles 过人
+    interceptions          INTEGER,       -- Interceptions 拦截
+    clearances             INTEGER,       -- Clearances 解围
+    dispossessed           INTEGER,       -- Dispossessed 被抢断
+    final_third_entries    INTEGER,       -- Final third entries 进入进攻三区
+    fouled_in_final_third  INTEGER,       -- Fouled in final third 进攻三区被犯规
+    big_chances            INTEGER,       -- Big chances 大机会
+    big_chances_missed     INTEGER,       -- Big chances missed 错失大机会
+    big_chances_scored     INTEGER,       -- Big chances scored 大机会进球
+    -- 【低覆盖有独特价值 2】
+    expected_goals         NUMERIC,       -- Expected goals 期望进球 xG
+    red_cards              INTEGER,       -- Red cards 红牌
+    -- 【次要档 14】覆盖 <60%
+    through_balls          INTEGER,       -- Through balls 直塞球
+    recoveries             INTEGER,       -- Recoveries 夺回球权
+    goals_prevented        NUMERIC,       -- Goals prevented 阻止进球
+    final_third_phase      INTEGER,       -- Final third phase 进攻三区推进
+    touches_in_penalty_area INTEGER,      -- Touches in penalty area 禁区内触球
+    distance_covered       NUMERIC,       -- Distance covered 跑动距离(km)
+    number_of_sprints      INTEGER,       -- Number of sprints 冲刺次数
+    high_claims            INTEGER,       -- High claims 高空球接获
+    big_saves              INTEGER,       -- Big saves 关键扑救
+    errors_lead_to_shot    INTEGER,       -- Errors lead to a shot 失误致射
+    punches                INTEGER,       -- Punches 拳击球
+    errors_lead_to_goal    INTEGER,       -- Errors lead to a goal 失误致丢球
+    penalty_saves          INTEGER,       -- Penalty saves 扑出点球
+    -- ============ 6 个复合分数指标 text 列（保真原始文本，查询时解析分母/百分比）============
+    ground_duels_text      TEXT,          -- 如 "37/65 (57%)"
+    aerial_duels_text      TEXT,          -- 如 "16/28 (57%)"
+    long_balls_text        TEXT,          -- 如 "22/71 (31%)"
+    crosses_text           TEXT,          -- 如 "5/19 (26%)"
+    dribbles_text          TEXT,          -- 如 "5/13 (38%)"
+    final_third_phase_text TEXT,          -- 如 "60/108 (56%)"
+    PRIMARY KEY (match_id, is_home, period)
+);
+```
+
+**字段来源与转化**：
+
+| 列 | JSON 来源 | 类型转换/口径 | 备注 |
+|---|---|---|---|
+| match_id | 文件顶层 `matchId` | 原样 | 与 matches.match_id 同值 |
+| is_home | statisticsItems 属于主队还是客队 | home=true / away=false | |
+| period | `statistics[].period` | 原样 | ALL/1ST/2ND；ET1/ET2 舍弃 |
+| 各 value 列 | `statistics[].groups[].statisticsItems[].homeValue/awayValue` | 按 is_home 取对应侧值 | 无该项则该列 NULL |
+| 6 个 _text 列 | 同上 `.home/away` | 原始字符串 | 仅复合分数指标保留 |
+
+**结构说明**（重要）：
+- 实际结构为 `statistics[] → {period, groups[]} → groups[] = {groupName, statisticsItems[]}`，item = `{name, home, away, homeValue, awayValue}`。
+- **51 个指标 name 全量核实**：40 个纯整数、2 个 float、1 个 km、4 个百分比（value 即百分比数值）、6 个复合分数（value 只含**分子**成功次数，分母/百分比仅在文本中）。
+- **value 语义**：6 个复合指标（Ground duels/Aerial duels/Long balls/Crosses/Dribbles/Final third phase）的 `homeValue/awayValue` 只是成功次数（如 Long balls value=22），完整 `"22/71 (31%)"` 在文本列保真；百分比需查询时从 text 解析（文本是唯一分母来源）。
+- 51 个指标与 group（Match overview/Shots/Passes/Goalkeeping/Attack/Duels/Defending）是稳定 1:1 映射，group 不存列，需要时按指标名所属组自行归类。
+
+**已核实事实**（全量 81,874 场）：
+- 有 statistics 的场次约 69,286 场（84.6%）；无 stats 场次 LEFT JOIN 为 NULL。
+- period 组合：1ST+2ND+ALL 共 63,207 场（77.2%）；**仅 ALL 无半场 5,447 场（6.7%）**；含 ET 仅 598 场（0.7%）。
+- 一场比赛 **6 行**（2 侧 × 3 期）；仅 ALL 的场次 2 行。总行数约 **39 万行**。
+- 无 stats 原因：canceled/postponed 1,621 场未踢无统计（合理）；finished 无 stats 约 10,944 场主要为源站标记 `hasEventPlayerStatistics=false`（无球员统计），仅 35 场标记 true 却缺失（爬虫缺口，可忽略）。
+
+**入库简述**：按 `(match_id, is_home, period)` upsert；遍历 statistics[] 每期生成主客 2 行，从 groups[].statisticsItems 按 name 映射到对应 value 列，复合指标同时填 text 列。
+
+---
+
+## 十七、已确认但暂不落库的语义（写入文档即可）
 
 - **比分字段语义**（current/display/normaltime/period1/period2 差异）：见"〇、6"，页面默认展示 normaltime，120 分钟/点球比分附注小字。不建表。
 - **status / cupRoundType / roundPrefix**：语义建表（七/八/九），同时本文档即为人类可读对照。
 - **现算字段**（current_team_id / 参赛列表 / 位置总览 / 进球牌）：见"十二、现算字段与查询口径"，不建列、由 SQL 现算。
+- **match_incidents 不建表**：比赛事件（进球/黄红牌/换人/阶段/VAR/点球）已确认不落库。理由：源站 substitution 事件无球员信息、penaltyShootout 无 time、无 id 事件多，分析价值与投入不成比例；进球/红牌等可从比分与统计推断。**如未来需要事件级分析再单独设计。**
 
 ---
 
-## 十七、待讨论（后续补充）
+## 十八、待讨论（后续补充）
 
-- details 相关表待定稿：`match_statistics`（team 级统计，实际结构为 `period → groups[] → groupName + statisticsItems[]`，非扁平）/ `match_incidents`（进球/牌/换人/阶段）/ `team_season_stats`。
+- details 相关表待定稿：`team_season_stats`（球队赛季统计）。
 - 当前已核实：`data/details/{联赛}/{赛季}/teams/{teamId}.json` 的 `team_season_stats` 含 **111 个键**（107 统计指标 + 4 元数据 id/matches/awardedMatches/statisticsType），全部标量，适合宽表建模。
-- 数据文件：赛程在 `schedules_v3`（本设计的数据源）；详情在 `data/details/`（结构已核实，见表十三/十四/十五）。
+- 数据文件：赛程在 `schedules_v3`（本设计的数据源）；详情在 `data/details/`（结构已核实，见表十三/十四/十五/十六）。
