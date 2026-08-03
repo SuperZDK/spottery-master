@@ -1,8 +1,8 @@
 # Sofascore 源库数据库设计（已定稿部分）
 
 > 本文档记录 **sofascore 库**已确认的数据表设计与数据来源映射，供开发、分析与后续建模参考。
-> 当前定稿范围：**matches + 4 张维度表（leagues/seasons/teams/countries）+ 3 张字典表（status_codes/cup_round_types/round_prefixes）+ details 相关表（players/match_players/match_details/match_votes/match_missing_players/match_statistics）**。
-> 尚未定稿、待讨论：`team_season_stats`。`match_incidents` **确认不建表**（详见"十六"）。
+> 当前定稿范围：**Sofascore 源库全部定稿** —— matches + 4 张维度表（leagues/seasons/teams/countries）+ 3 张字典表（status_codes/cup_round_types/round_prefixes）+ details 相关表（players/match_players/match_details/match_votes/match_missing_players/match_statistics/team_season_stats）。
+> `match_incidents` **确认不建表**（详见"十七"）。
 > 所有表均采用**软关联（无 FOREIGN KEY）**，字段来源与转化方式见各表"字段来源与转化"小节。
 
 ---
@@ -723,7 +723,170 @@ CREATE INDEX idx_match_statistics_ls ON match_statistics (league_id, season_id, 
 
 ---
 
-## 十七、已确认但暂不落库的语义（写入文档即可）
+## 十七、team_season_stats — 球队赛季统计表
+
+数据源：`data/details/{联赛}/{赛季}/teams/{teamId}.json` 的 `statistics` 对象（每队每赛季一个文件，全量 5,831 个）。`statistics` 为**扁平标量结构**：`{ 指标名: 数值 }`，共 **117 个键**（113 统计指标 + 4 元数据 id/matches/awardedMatches/statisticsType）。宽表 1:1 转列。
+
+```sql
+CREATE TABLE team_season_stats (
+    team_id    INTEGER NOT NULL,       -- 原生 teamId，软关联 teams.team_id
+    league_id  INTEGER NOT NULL,       -- 原生 leagueId，软关联 leagues（查询入口）
+    season_id  INTEGER NOT NULL,       -- 原生 seasonId，软关联 seasons（查询入口）
+    -- ==== 元数据（statistics.*）====
+    matches         INTEGER,           -- statistics.matches 源站统计的场次数（可用于校验）
+    awarded_matches INTEGER,           -- statistics.awardedMatches 判给场次
+    -- ==== 进攻 ====
+    goals_scored             INTEGER,  -- goalsScored 进球数
+    goals_conceded           INTEGER,  -- goalsConceded 失球数
+    own_goals                INTEGER,  -- ownGoals 乌龙球数
+    assists                  INTEGER,  -- assists 助攻数
+    penalty_goals            INTEGER,  -- penaltyGoals 点球进球
+    penalties_taken          INTEGER,  -- penaltiesTaken 点球主罚次数
+    free_kick_goals          INTEGER,  -- freeKickGoals 任意球进球
+    free_kick_shots          INTEGER,  -- freeKickShots 任意球射门
+    goals_from_inside_the_box    INTEGER,  -- goalsFromInsideTheBox 禁区内进球
+    goals_from_outside_the_box   INTEGER,  -- goalsFromOutsideTheBox 禁区外进球
+    headed_goals             INTEGER,  -- headedGoals 头球进球
+    left_foot_goals          INTEGER,  -- leftFootGoals 左脚进球
+    right_foot_goals         INTEGER,  -- rightFootGoals 右脚进球
+    big_chances_created      INTEGER,  -- bigChancesCreated 创造的大机会
+    -- ==== 射门 ====
+    shots                    INTEGER,  -- shots 总射门
+    shots_on_target          INTEGER,  -- shotsOnTarget 射正
+    shots_off_target         INTEGER,  -- shotsOffTarget 射偏
+    shots_from_inside_the_box    INTEGER,  -- shotsFromInsideTheBox 禁区内射门
+    shots_from_outside_the_box   INTEGER,  -- shotsFromOutsideTheBox 禁区外射门
+    blocked_scoring_attempt  INTEGER,  -- blockedScoringAttempt 被封堵的射门
+    hit_woodwork             INTEGER,  -- hitWoodwork 击中门框
+    big_chances              INTEGER,  -- bigChances 大机会
+    big_chances_missed       INTEGER,  -- bigChancesMissed 错失大机会
+    -- ==== 过人 / 定位球 ====
+    successful_dribbles      INTEGER,  -- successfulDribbles 成功过人
+    dribble_attempts         INTEGER,  -- dribbleAttempts 过人尝试次数
+    corners                  INTEGER,  -- corners 角球数
+    free_kicks               INTEGER,  -- freeKicks 获得的任意球
+    throw_ins                INTEGER,  -- throwIns 界外球
+    goal_kicks               INTEGER,  -- goalKicks 球门球
+    -- ==== 快攻 ====
+    fast_breaks              INTEGER,  -- fastBreaks 快攻次数
+    fast_break_shots         INTEGER,  -- fastBreakShots 快攻射门
+    fast_break_goals         INTEGER,  -- fastBreakGoals 快攻进球
+    -- ==== 控球与传球 ====
+    average_ball_possession  NUMERIC,  -- averageBallPossession 平均控球率(%)
+    total_passes             INTEGER,  -- totalPasses 总传球
+    accurate_passes          INTEGER,  -- accuratePasses 成功传球
+    accurate_passes_percentage       NUMERIC,  -- accuratePassesPercentage 传球成功率(%)
+    total_own_half_passes    INTEGER,  -- totalOwnHalfPasses 本方半场总传球
+    accurate_own_half_passes INTEGER,  -- accurateOwnHalfPasses 本方半场成功传球
+    accurate_own_half_passes_percentage  NUMERIC,  -- accurateOwnHalfPassesPercentage 本方半场传球成功率(%)
+    total_opposition_half_passes INTEGER,  -- totalOppositionHalfPasses 对方半场总传球
+    accurate_opposition_half_passes   INTEGER,  -- accurateOppositionHalfPasses 对方半场成功传球
+    accurate_opposition_half_passes_percentage NUMERIC,  -- accurateOppositionHalfPassesPercentage 对方半场传球成功率(%)
+    total_long_balls         INTEGER,  -- totalLongBalls 总长传
+    accurate_long_balls      INTEGER,  -- accurateLongBalls 成功长传
+    accurate_long_balls_percentage    NUMERIC,  -- accurateLongBallsPercentage 长传成功率(%)
+    total_crosses            INTEGER,  -- totalCrosses 总传中
+    accurate_crosses         INTEGER,  -- accurateCrosses 成功传中
+    accurate_crosses_percentage       NUMERIC,  -- accurateCrossesPercentage 传中成功率(%)
+    -- ==== 防守 ====
+    clean_sheets             INTEGER,  -- cleanSheets 零封场次
+    tackles                  INTEGER,  -- tackles 抢断
+    interceptions            INTEGER,  -- interceptions 拦截
+    saves                    INTEGER,  -- saves 扑救（门将）
+    errors_leading_to_goal   INTEGER,  -- errorsLeadingToGoal 失误致丢球
+    errors_leading_to_shot   INTEGER,  -- errorsLeadingToShot 失误致对方射门
+    penalties_commited       INTEGER,  -- penaltiesCommited 被判点球次数
+    penalty_goals_conceded   INTEGER,  -- penaltyGoalsConceded 点球失球
+    clearances               INTEGER,  -- clearances 解围
+    clearances_off_line      INTEGER,  -- clearancesOffLine 门线解围
+    last_man_tackles         INTEGER,  -- lastManTackles 最后一人抢断
+    total_duels              INTEGER,  -- totalDuels 总对抗
+    duels_won                INTEGER,  -- duelsWon 对抗获胜
+    duels_won_percentage     NUMERIC,  -- duelsWonPercentage 对抗胜率(%)
+    total_ground_duels       INTEGER,  -- totalGroundDuels 总地面对抗
+    ground_duels_won         INTEGER,  -- groundDuelsWon 地面对抗获胜
+    ground_duels_won_percentage NUMERIC,  -- groundDuelsWonPercentage 地面对抗胜率(%)
+    total_aerial_duels       INTEGER,  -- totalAerialDuels 总空中对抗
+    aerial_duels_won         INTEGER,  -- aerialDuelsWon 空中对抗获胜
+    aerial_duels_won_percentage      NUMERIC,  -- aerialDuelsWonPercentage 空中对抗胜率(%)
+    possession_lost          INTEGER,  -- possessionLost 失去球权
+    ball_recovery            INTEGER,  -- ballRecovery 夺回球权
+    -- ==== 纪律 ====
+    offsides                 INTEGER,  -- offsides 越位
+    fouls                    INTEGER,  -- fouls 犯规
+    yellow_cards             INTEGER,  -- yellowCards 黄牌
+    yellow_red_cards         INTEGER,  -- yellowRedCards 两黄变一红
+    red_cards                INTEGER,  -- redCards 红牌
+    -- ==== 其他 ====
+    avg_rating               NUMERIC,  -- avgRating 平均评分
+    kilometers_covered       NUMERIC,  -- kilometersCovered 跑动距离(km)
+    number_of_sprints        INTEGER,  -- numberOfSprints 冲刺次数
+    -- ==== 对手视角（Against，指标名含 Against 前缀）====
+    shots_against                    INTEGER,  -- shotsAgainst 对手总射门
+    shots_on_target_against          INTEGER,  -- shotsOnTargetAgainst 对手射正
+    shots_off_target_against         INTEGER,  -- shotsOffTargetAgainst 对手射偏
+    shots_blocked_against            INTEGER,  -- shotsBlockedAgainst 对手被封堵射门
+    shots_from_inside_the_box_against    INTEGER,  -- shotsFromInsideTheBoxAgainst 对手禁区内射门
+    shots_from_outside_the_box_against   INTEGER,  -- shotsFromOutsideTheBoxAgainst 对手禁区外射门
+    corners_against                  INTEGER,  -- cornersAgainst 对手角球
+    hit_woodwork_against             INTEGER,  -- hitWoodworkAgainst 对手击中门框
+    blocked_scoring_attempt_against  INTEGER,  -- blockedScoringAttemptAgainst 对手被封堵射门
+    big_chances_against              INTEGER,  -- bigChancesAgainst 对手大机会
+    big_chances_created_against      INTEGER,  -- bigChancesCreatedAgainst 对手创造大机会
+    big_chances_missed_against       INTEGER,  -- bigChancesMissedAgainst 对手错失大机会
+    crosses_successful_against       INTEGER,  -- crossesSuccessfulAgainst 对手成功传中
+    crosses_total_against            INTEGER,  -- crossesTotalAgainst 对手总传中
+    dribble_attempts_total_against   INTEGER,  -- dribbleAttemptsTotalAgainst 对手过人尝试
+    dribble_attempts_won_against     INTEGER,  -- dribbleAttemptsWonAgainst 对手成功过人
+    long_balls_successful_against    INTEGER,  -- longBallsSuccessfulAgainst 对手成功长传
+    long_balls_total_against         INTEGER,  -- longBallsTotalAgainst 对手总长传
+    offsides_against                 INTEGER,  -- offsidesAgainst 对手越位
+    red_cards_against                INTEGER,  -- redCardsAgainst 对手红牌
+    yellow_cards_against             INTEGER,  -- yellowCardsAgainst 对手黄牌
+    tackles_against                  INTEGER,  -- tacklesAgainst 对手抢断
+    interceptions_against            INTEGER,  -- interceptionsAgainst 对手拦截
+    clearances_against               INTEGER,  -- clearancesAgainst 对手解围
+    errors_leading_to_goal_against   INTEGER,  -- errorsLeadingToGoalAgainst 对手失误致丢球
+    errors_leading_to_shot_against   INTEGER,  -- errorsLeadingToShotAgainst 对手失误致射门
+    key_passes_against               INTEGER,  -- keyPassesAgainst 对手关键传球
+    total_passes_against             INTEGER,  -- totalPassesAgainst 对手总传球
+    accurate_passes_against          INTEGER,  -- accuratePassesAgainst 对手成功传球
+    accurate_own_half_passes_against INTEGER,  -- accurateOwnHalfPassesAgainst 对手本方半场成功传球
+    accurate_opposition_half_passes_against INTEGER,  -- accurateOppositionHalfPassesAgainst 对手对方半场成功传球
+    own_half_passes_total_against    INTEGER,  -- ownHalfPassesTotalAgainst 对手本方半场总传球
+    opposition_half_passes_total_against INTEGER,  -- oppositionHalfPassesTotalAgainst 对手对方半场总传球
+    accurate_final_third_passes_against INTEGER,  -- accurateFinalThirdPassesAgainst 对手进攻三区成功传球
+    total_final_third_passes_against INTEGER,  -- totalFinalThirdPassesAgainst 对手进攻三区总传球
+    PRIMARY KEY (team_id, season_id)
+);
+CREATE INDEX idx_team_season_stats_ls ON team_season_stats (league_id, season_id);
+```
+
+**字段来源与转化**：
+
+| 列 | JSON 来源 | 类型转换/口径 | 备注 |
+|---|---|---|---|
+| team_id / league_id / season_id | 文件顶层 `teamId` / `leagueId` / `seasonId` | 原样 | 与 teams/leagues/seasons 表同值 |
+| matches / awarded_matches | `statistics.matches` / `statistics.awardedMatches` | 原样 | 元数据，见"结构说明" |
+| 各统计列 | `statistics.{指标名}`（camelCase → snake_case） | 百分比/评分/跑动距离为 NUMERIC，其余 INTEGER | 缺失键该列 NULL |
+
+**结构说明**（重要）：
+- `statistics` 为**扁平对象**：`{ goalsScored: 60, shots: 399, ... }`，每键一个标量。**无嵌套、无单位统一**（percent 键为百分数值、kilometersCovered 为 km），宽表 1:1 转列最直接。
+- **117 键全集**：113 统计指标 + 4 元数据（id/matches/awardedMatches/statisticsType）。主流 111 键；低覆盖 6 项为 `ballRecovery`/`freeKicks`/`goalKicks`/`throwIns`/`kilometersCovered`/`numberOfSprints`（部分球队/赛事缺失）。全表 117 列，缺失键该列 NULL。
+- **变体均为 117 键子集**：杯赛（欧冠/欧联/意大利杯/国王杯）球队场次少，只有 11~42 键，均为主流键的子集 → 一表全覆盖、缺失列 NULL，无需按赛事分表。
+- **元数据取舍**：`matches`（源站统计场次数，可校验爬取完整性）、`awardedMatches`（判给场次）入库；`id`（源站内部记录 id，无分析价值）、`statisticsType`（全部固定 {football, team} 常量）**不存**。
+- **对手视角（Against）列**：指标名含 `Against` 后缀者为"该队比赛中对手的数据"（如 shotsAgainst=对手总射门），与 match_statistics 的 is_home 反侧行对应，可用于攻防对称校验。
+- **主键**：`(team_id, season_id)` 全库唯一（已核实无重复）；`league_id/season_id` 为查询入口（文件原生即有，非额外冗余）。
+
+**已核实事实**（全量 5,831 文件）：
+- 每队每赛季一个文件，`(team_id, season_id)` 无重复；顶层三 id 字段 100% 完整。
+- 键集合变体：主流 111 键 / 115 键（多 4 低覆盖）/ 117 键（全）共 3 种，另杯赛 11~42 键变体，全部为 117 键子集。
+
+**入库简述**：按 `(team_id, season_id)` upsert；读取 statistics 对象各键按映射写入对应列，缺失键留 NULL。
+
+---
+
+## 十八、已确认但暂不落库的语义（写入文档即可）
 
 - **比分字段语义**（current/display/normaltime/period1/period2 差异）：见"〇、6"，页面默认展示 normaltime，120 分钟/点球比分附注小字。不建表。
 - **status / cupRoundType / roundPrefix**：语义建表（七/八/九），同时本文档即为人类可读对照。
@@ -732,8 +895,7 @@ CREATE INDEX idx_match_statistics_ls ON match_statistics (league_id, season_id, 
 
 ---
 
-## 十八、待讨论（后续补充）
+## 十九、待讨论（后续补充）
 
-- details 相关表待定稿：`team_season_stats`（球队赛季统计）。
-- 当前已核实：`data/details/{联赛}/{赛季}/teams/{teamId}.json` 的 `team_season_stats` 含 **111 个键**（107 统计指标 + 4 元数据 id/matches/awardedMatches/statisticsType），全部标量，适合宽表建模。
-- 数据文件：赛程在 `schedules_v3`（本设计的数据源）；详情在 `data/details/`（结构已核实，见表十三/十四/十五/十六）。
+- Sofascore 源库 15 张表已全部定稿，无待讨论项。
+- 数据文件：赛程在 `schedules_v3`（本设计的数据源）；详情在 `data/details/`（结构已核实，见表十三/十四/十五/十六/十七）。
