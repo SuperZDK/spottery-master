@@ -395,7 +395,7 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 
 ### 7.2 竞彩库
 
-沿用现有 `spottery_pro/backend/app/models/jingcai.py` 的全部 **17 张表结构不变**，迁到 `jingcai` 独立 database：
+沿用现有 `spottery_pro/backend/app/models/jingcai.py` 的全部 **18 张表结构不变**，迁到 `jingcai` 独立 database：
 
 | 表 | 行数 | 说明 |
 |---|---|---|
@@ -416,8 +416,308 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 | `jingcai_season_features` | 65,896 | 赛季特征 |
 | `jingcai_teams` | 2,771 | 球队映射 |
 | `jingcai_leagues` | 134 | 联赛映射 |
+| `jingcai_import_files` | — | 导入文件记录 |
 
 迁移方式：`pg_dump -t 'jingcai_*'` 从平台库导出 → `pg_restore` 到 `jingcai` 库。
+
+**各表字段明细**（字段中文说明为模型字段名直译，JSON 来源待补充，对应竞彩官网接口字段）：
+
+#### `jingcai_matches` — 竞彩比赛主体（约 7.7 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `match_id` | Integer PK | 竞彩比赛 ID |
+| `business_date` | Date NOT NULL | 销售日（开售日期） |
+| `match_date` | Date NOT NULL | 比赛日期 |
+| `kickoff_time` | DateTime | 开赛时间 |
+| `match_num` | String NOT NULL | 比赛编号（如 周日001） |
+| `home_team` | String NOT NULL | 主队名 |
+| `away_team` | String NOT NULL | 客队名 |
+| `league` | String | 联赛名 |
+| `sporttery_home_id` | Integer | 体彩主队 ID |
+| `sporttery_away_id` | Integer | 体彩客队 ID |
+| `uniform_home_id` | Integer | 统一主队 ID |
+| `uniform_away_id` | Integer | 统一客队 ID |
+| `sporttery_league_id` | Integer | 体彩联赛 ID |
+| `uniform_league_id` | Integer | 统一联赛 ID |
+| `tournament_id` | Integer | 赛事 ID |
+| `season_id` | Integer | 赛季 ID |
+| `season_name` | String | 赛季名 |
+| `phase_name` | String | 阶段名（如 常规赛/附加赛） |
+| `home_score` | Integer | 主队比分 |
+| `away_score` | Integer | 客队比分 |
+| `status` | String NOT NULL | 状态（默认 FINISHED） |
+| `pool_status` | String | 奖池状态 |
+| `scraped_at` | DateTime | 抓取时间 |
+
+索引：`business_date`、`match_date`、`status`。
+
+#### `jingcai_teams` — 球队映射（约 0.3 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `name` | String NOT NULL | 球队名 |
+| `short_name` | String | 简称 |
+| `sporttery_id` | Integer UNIQUE | 体彩 ID |
+| `uniform_id` | Integer | 统一 ID |
+
+#### `jingcai_leagues` — 联赛映射（约 134 行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `name` | String NOT NULL | 联赛名 |
+| `short_name` | String | 简称 |
+| `sporttery_id` | Integer UNIQUE | 体彩 ID |
+| `uniform_id` | Integer | 统一 ID |
+| `season_id` | Integer | 赛季 ID |
+| `season_name` | String | 赛季名 |
+
+#### `jingcai_odds` — 赔率汇总（约 34.9 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `odds_type` | String NOT NULL | 赔率类型（SPF/RQSPF/CRS/TTG/HAFU） |
+| `snapshot_at` | DateTime | 快照时间 |
+| `home` | Float | 主胜赔 |
+| `draw` | Float | 平局赔 |
+| `away` | Float | 客胜赔 |
+| `handicap` | String | 让球盘 |
+| `options` | Text | 选项明细（比分/总进球等） |
+
+唯一约束 `(match_id, odds_type)`。
+
+#### `jingcai_odds_spf` — 胜平负明细快照（约 26.1 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `snapshot_at` | DateTime NOT NULL | 快照时间 |
+| `update_date` | String | 更新日期 |
+| `update_time` | String | 更新时间 |
+| `home` | Float | 主胜赔 |
+| `draw` | Float | 平局赔 |
+| `away` | Float | 客胜赔 |
+
+唯一约束 `(match_id, snapshot_at)`。
+
+#### `jingcai_odds_rqspf` — 让球胜平负明细快照（约 26.8 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `snapshot_at` | DateTime NOT NULL | 快照时间 |
+| `update_date` | String | 更新日期 |
+| `update_time` | String | 更新时间 |
+| `home` | Float | 主胜赔 |
+| `draw` | Float | 平局赔 |
+| `away` | Float | 客胜赔 |
+| `handicap` | String | 让球盘 |
+
+唯一约束 `(match_id, snapshot_at)`。
+
+#### `jingcai_odds_crs` — 比分明细快照（约 13.9 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `snapshot_at` | DateTime NOT NULL | 快照时间 |
+| `options` | Text | 比分选项及赔率 |
+
+唯一约束 `(match_id, snapshot_at)`。
+
+#### `jingcai_odds_ttg` — 总进球明细快照（约 14.5 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `snapshot_at` | DateTime NOT NULL | 快照时间 |
+| `options` | Text | 进球数选项及赔率 |
+
+唯一约束 `(match_id, snapshot_at)`。
+
+#### `jingcai_odds_hafu` — 半全场明细快照（约 15.8 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `snapshot_at` | DateTime NOT NULL | 快照时间 |
+| `options` | Text | 半全场选项及赔率 |
+
+唯一约束 `(match_id, snapshot_at)`。
+
+#### `jingcai_pools` — 奖池（约 32.6 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `code` | String NOT NULL | 玩法代码 |
+| `combination` | String | 组合 |
+| `combination_desc` | String | 组合描述 |
+| `odds` | Float | 赔率 |
+| `goal_line` | String | 进球线 |
+| `pool_id` | Integer | 奖池 ID |
+| `pool_totals` | String | 奖池总额 |
+| `refund_status` | String | 退款状态 |
+
+唯一约束 `(match_id, code)`。
+
+#### `jingcai_standings` — 积分榜（约 35.4 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `team_type` | String NOT NULL | home/away |
+| `view` | String NOT NULL | 榜单视图（总/主/客） |
+| `team_name` | String | 队名 |
+| `team_id` | Integer | 队 ID |
+| `ranking` | Integer | 排名 |
+| `points` | Integer | 积分 |
+| `played` | Integer | 已赛场次 |
+| `wins` | Integer | 胜 |
+| `draws` | Integer | 平 |
+| `losses` | Integer | 负 |
+| `goals_for` | Integer | 进球 |
+| `goals_against` | Integer | 失球 |
+| `goal_diff` | Integer | 净胜球 |
+| `win_probability` | String | 获胜概率 |
+| `phase_name` | String | 阶段名 |
+
+唯一约束 `(match_id, team_type, view)`。
+
+#### `jingcai_h2h` — 历史交锋（约 42.1 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `match_date` | Date | 比赛日期 |
+| `home_team_id` | Integer | 主队 ID |
+| `away_team_id` | Integer | 客队 ID |
+| `home_score` | Integer | 主队比分 |
+| `away_score` | Integer | 客队比分 |
+| `half_home_score` | Integer | 半场主队比分 |
+| `half_away_score` | Integer | 半场客队比分 |
+| `season_id` | Integer | 赛季 ID |
+| `tournament_id` | Integer | 赛事 ID |
+| `winning_team` | String | 获胜方 |
+
+唯一约束 `(match_id, match_date, home_team_id, away_team_id)`。
+
+#### `jingcai_recent_results` — 近期赛果（约 24.3 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `team_uniform_id` | Integer NOT NULL | 球队统一 ID |
+| `match_date` | Date | 比赛日期 |
+| `opponent_uniform_id` | Integer | 对手统一 ID |
+| `home_score` | Integer | 主队比分 |
+| `away_score` | Integer | 客队比分 |
+| `half_home_score` | Integer | 半场主队比分 |
+| `half_away_score` | Integer | 半场客队比分 |
+| `result` | String | 结果（胜/平/负） |
+| `season_id` | Integer | 赛季 ID |
+| `tournament_id` | Integer | 赛事 ID |
+| `source_match_id` | Integer | 源比赛 ID |
+
+唯一约束 `(team_uniform_id, match_date, source_match_id)`。
+
+#### `jingcai_fixtures` — 未来赛程（约 0.5 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `team_uniform_id` | Integer NOT NULL | 球队统一 ID |
+| `match_date` | DateTime | 开赛时间 |
+| `opponent_uniform_id` | Integer | 对手统一 ID |
+| `gameweek` | String | 轮次 |
+| `season_id` | Integer | 赛季 ID |
+| `tournament_id` | Integer | 赛事 ID |
+| `source_match_id` | Integer | 源比赛 ID |
+
+唯一约束 `(team_uniform_id, match_date, source_match_id)`。
+
+#### `jingcai_injuries` — 伤病名单（约 13.9 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `team_type` | String NOT NULL | home/away |
+| `person_id` | Integer | 人员 ID |
+| `person_name` | String | 姓名 |
+| `position_code` | String | 位置代码 |
+| `position_desc` | String | 位置描述 |
+| `injury_flag` | Integer | 伤病标记 |
+| `suspension_flag` | Integer | 停赛标记 |
+| `appearance_cnt` | Integer | 出场次数 |
+| `started_cnt` | Integer | 首发次数 |
+| `uniform_no` | String | 球衣号 |
+
+唯一约束 `(match_id, team_type, person_id)`。
+
+#### `jingcai_players` — 球员数据（约 38.2 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer NOT NULL | 比赛 ID |
+| `team_type` | String NOT NULL | home/away |
+| `person_id` | Integer | 人员 ID |
+| `person_name` | String | 姓名 |
+| `position_code` | String | 位置代码 |
+| `position_desc` | String | 位置描述 |
+| `goal_cnt` | Integer | 进球数 |
+| `assist_cnt` | Integer | 助攻数 |
+| `appearance_cnt` | Integer | 出场次数 |
+| `started_cnt` | Integer | 首发次数 |
+| `injury_flag` | Integer | 伤病标记 |
+| `suspension_flag` | Integer | 停赛标记 |
+| `uniform_no` | String | 球衣号 |
+
+唯一约束 `(match_id, team_type, person_id)`。
+
+#### `jingcai_season_features` — 赛季特征（约 6.6 万行）
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `match_id` | Integer UNIQUE | 比赛 ID |
+| `home_team` | String | 主队名 |
+| `away_team` | String | 客队名 |
+| `goal_avg_home` | Float | 主队场均进球 |
+| `goal_avg_away` | Float | 客队场均进球 |
+| `loss_goal_avg_home` | Float | 主队场均失球 |
+| `loss_goal_avg_away` | Float | 客队场均失球 |
+| `recent_home_wins` | Integer | 主队近期胜 |
+| `recent_home_draws` | Integer | 主队近期平 |
+| `recent_home_losses` | Integer | 主队近期负 |
+| `recent_away_wins` | Integer | 客队近期胜 |
+| `recent_away_draws` | Integer | 客队近期平 |
+| `recent_away_losses` | Integer | 客队近期负 |
+| `data` | Text | 原始数据 |
+
+#### `jingcai_import_files` — 导入文件记录
+
+| 字段名 | 类型 | 中文说明 |
+| --- | --- | --- |
+| `id` | Integer PK | 自增主键 |
+| `file_path` | String UNIQUE NOT NULL | 源文件路径 |
+| `size` | Integer | 文件大小 |
+| `mtime` | Float | 修改时间戳 |
+| `status` | String NOT NULL | 状态（默认 ok） |
+| `imported_at` | DateTime NOT NULL | 导入时间 |
 
 ### 7.3 球探库
 
