@@ -367,63 +367,31 @@ docker cp spottery-pg:/tmp/sofascore.dump ./backup/sofascore-<日期>.dump
 
 ### 7.1 Sofascore 库
 
-```sql
--- ============================================
--- sofascore 库：Sofascore 爬虫数据
--- ============================================
+Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.md`](sofascore-database.md)（含每张表的完整 DDL、字段来源与转化、已核实数据规模）。
 
--- 赛程表
-CREATE TABLE match_schedules (
-    match_id        INTEGER PRIMARY KEY,          -- Sofascore event ID
-    league_id       INTEGER NOT NULL,             -- unique-tournament ID
-    season_id       INTEGER NOT NULL,
-    season_key      TEXT,                         -- 如 "24/25" / "2024"
-    slug            TEXT,
-    home_team_id    INTEGER,
-    away_team_id    INTEGER,
-    home_score      INTEGER,
-    away_score      INTEGER,
-    round_num       INTEGER,
-    round_slug      TEXT,
-    round_prefix    TEXT,
-    kickoff_time    TIMESTAMPTZ NOT NULL,
-    status          TEXT NOT NULL,                -- finished / postponed / inprogress...
-    tournament_name TEXT,
-    data_raw        JSONB,                        -- 原始 API 响应（灾备）
-    scraped_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (league_id, season_id, match_id)
-);
-CREATE INDEX idx_schedules_kickoff ON match_schedules (kickoff_time);
-CREATE INDEX idx_schedules_league_season ON match_schedules (league_id, season_id);
+共 **15 张表**：
 
--- 比赛详情表（1:1 match_schedules）
-CREATE TABLE match_details (
-    match_id        INTEGER PRIMARY KEY REFERENCES match_schedules(match_id),
-    season_id       INTEGER,
-    referee         TEXT,
-    venue           TEXT,
-    attendance      INTEGER,
-    pregame_form    JSONB,                        -- 赛前排位 + 近期状态
-    votes           JSONB,                        -- 赛前投票
-    lineups         JSONB,                        -- 首发/替补/伤病
-    statistics      JSONB,                        -- 技术统计（按半场）
-    incidents       JSONB,                        -- 比赛事件
-    data_raw        JSONB,                        -- 原始 API 响应（灾备）
-    scraped_at      TIMESTAMPTZ DEFAULT now()
-);
+| 分类 | 表 | 说明 |
+|---|---|---|
+| 维度 | `countries` | 国家/洲际区域（29 行） |
+| 维度 | `leagues` | 联赛（29 行） |
+| 维度 | `seasons` | 赛季（309 行） |
+| 维度 | `teams` | 球队（2,159 行） |
+| 主表 | `matches` | 赛程（82,288 场，比分/状态/主客队） |
+| 字典 | `status_codes` / `cup_round_types` / `round_prefixes` | 状态码 / 杯赛轮次 / 阶段标签 |
+| 详情 | `match_details` | 裁判/球场/上座/阵容/赛前排位 |
+| 详情 | `match_statistics` | 球队技术统计（is_home × period，~39 万行） |
+| 详情 | `match_players` | 比赛阵容 + 球员单场统计 |
+| 详情 | `players` | 球员维度薄表 |
+| 详情 | `match_missing_players` | 伤停名单 |
+| 详情 | `match_votes` | 球迷投票时间序列 |
+| 详情 | `team_season_stats` | 球队赛季统计宽表（5,831 行 × 118 列） |
 
--- 球队赛季统计
-CREATE TABLE team_season_stats (
-    team_id         INTEGER NOT NULL,
-    league_id       INTEGER NOT NULL,
-    season_id       INTEGER NOT NULL,
-    statistics      JSONB NOT NULL,               -- ~115 项指标
-    data_raw        JSONB,
-    scraped_at      TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (team_id, league_id, season_id)
-);
-```
+**关键设计约定**（详见定稿文档"〇、设计全局原则"）：
+- 所有表**软关联（无 FOREIGN KEY）**，查询用 LEFT JOIN。
+- 明细表统一冗余 `league_id/season_id` 作查询入口，配 `(league_id, season_id, ...)` 复合索引，免 JOIN matches 即可按赛事/赛季过滤。
+- `match_incidents`（比赛事件）**确认不建表**，进球/红牌等从比分与统计推断。
+- 比分/状态以 `matches` 表（schedules_v3）为准；详情表不重复存比分状态。
 
 ### 7.2 竞彩库
 
