@@ -395,391 +395,161 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 
 ### 7.2 竞彩库
 
-沿用现有 `spottery_pro/backend/app/models/jingcai.py` 的全部 **18 张表结构不变**，迁到 `jingcai` 独立 database：
+竞彩源库 schema **已全部定稿**，详见 [`docs/jingcai-database.md`](jingcai-database.md)（含每张表的完整 DDL、字段来源与转化、已核实数据规模与核验记录）。
 
-| 表 | 行数 | 说明 |
+共 **8 张表**（数据来自 `scrapers/data/jingcai/daily/*.json` 与 `matches/{matchId}.json`）：
+
+| 表 | 行数（10 万场估算） | 说明 |
 |---|---|---|
-| `jingcai_matches` | 76,969 | 竞彩比赛主体 |
-| `jingcai_odds` | 349,234 | 赔率汇总（SPF/RQSPF/CRS/TTG/HAFU） |
-| `jingcai_odds_spf` | 261,485 | 胜平负明细快照 |
-| `jingcai_odds_rqspf` | 268,489 | 让球胜平负明细快照 |
-| `jingcai_odds_crs` | 139,285 | 比分明细快照 |
-| `jingcai_odds_ttg` | 145,285 | 总进球明细快照 |
-| `jingcai_odds_hafu` | 158,270 | 半全场明细快照 |
-| `jingcai_pools` | 325,588 | 奖池 |
-| `jingcai_standings` | 354,042 | 积分榜 |
-| `jingcai_h2h` | 421,051 | 历史交锋 |
-| `jingcai_recent_results` | 243,271 | 近期赛果 |
-| `jingcai_fixtures` | 5,482 | 未来赛程 |
-| `jingcai_injuries` | 138,925 | 伤病名单 |
-| `jingcai_players` | 381,905 | 球员数据 |
-| `jingcai_season_features` | 65,896 | 赛季特征 |
-| `jingcai_teams` | 2,771 | 球队映射 |
-| `jingcai_leagues` | 134 | 联赛映射 |
-| `jingcai_import_files` | — | 导入文件记录 |
+| `jingcai_matches` | 100,000 | 竞彩比赛主体（赛程 + 比分 + 开赛时间 + 单关标记） |
+| `jingcai_votes` | 200,000 | 投票横表（HAD/RQSPF 两池，含 psy_error 心理误差档位） |
+| `jingcai_odds_spf` | 338,000 | 胜平负赔率快照（无让球线） |
+| `jingcai_odds_rqspf` | 339,000 | 让球胜平负赔率快照（唯一含 goal_line） |
+| `jingcai_odds_ttg` | 188,000 | 总进球赔率快照（odds_0..odds_7） |
+| `jingcai_odds_hafu` | 184,000 | 半全场赔率快照（9 组合） |
+| `jingcai_odds_crs` | 166,000 | 比分赔率快照（31 列平铺） |
+| `jingcai_pools` | 498,000 | 奖池（五池各一行） |
 
-迁移方式：`pg_dump -t 'jingcai_*'` 从平台库导出 → `pg_restore` 到 `jingcai` 库。
+迁移方式：全量重建，按 `scrapers/data/jingcai` 解析导入（旧 18 表不迁移，其中 10 张确认不建）。
 
-**各表字段明细**（字段中文说明为模型字段名直译，JSON 来源待补充，对应竞彩官网接口字段）：
+**关键设计约定**（详见定稿文档"〇、设计全局原则"）：
+- 所有表**软关联（无 FOREIGN KEY）**，统一以 `match_id` 关联，只存 `match_id`（home/away/league 的 sporttery/uniform/内部 ID 一律不存，只保留 3 个名称字段）。
+- 赔率快照**打平不做母表**（不建 `jingcai_odds` 汇总表），五池各一张平铺表。
+- 字符串数值一律转数值存储（赔率/支持率/概率/error）；`error = supportRate − probability`，可为负。
+- 恒值/可推导字段不落库：`*f` 变动方向、`oddsType`（恒 F）、`lineStatus`/`oddsGoalLine`（恒空）、`refundStatus`（恒 0）。
+- HAD/TTG/HAFU/CRS 四池 `goalLine` 恒空，故 `goal_line` 仅出现在 `jingcai_odds_rqspf` 与 `jingcai_pools`。
+- 旧 18 表中的 `standings` / `h2h` / `recent_results` / `fixtures` / `injuries` / `players` / `season_features` / `teams` / `leagues` / `import_files` **确认不建表**（衍生数据，详见"十、不落库清单"）。
 
-#### `jingcai_matches` — 竞彩比赛主体（约 7.7 万行）
+#### `jingcai_matches` — 竞彩比赛主体
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
-| `match_id` | Integer PK | 竞彩比赛 ID |
+| `match_id` | Integer PK | 竞彩比赛 ID（daily.matchId = 详情文件名） |
 | `business_date` | Date NOT NULL | 销售日（开售日期） |
 | `match_date` | Date NOT NULL | 比赛日期 |
-| `kickoff_time` | DateTime | 开赛时间 |
-| `match_num` | String NOT NULL | 比赛编号（如 周日001） |
+| `match_num` | String NOT NULL | 比赛编号（如 周六012） |
 | `home_team` | String NOT NULL | 主队名 |
 | `away_team` | String NOT NULL | 客队名 |
-| `league` | String | 联赛名 |
-| `sporttery_home_id` | Integer | 体彩主队 ID |
-| `sporttery_away_id` | Integer | 体彩客队 ID |
-| `uniform_home_id` | Integer | 统一主队 ID |
-| `uniform_away_id` | Integer | 统一客队 ID |
-| `sporttery_league_id` | Integer | 体彩联赛 ID |
-| `uniform_league_id` | Integer | 统一联赛 ID |
-| `tournament_id` | Integer | 赛事 ID |
-| `season_id` | Integer | 赛季 ID |
-| `season_name` | String | 赛季名 |
-| `phase_name` | String | 阶段名（如 常规赛/附加赛） |
+| `league` | String | 联赛名（已验证 = matchInfo.tournamentCnName） |
 | `home_score` | Integer | 主队比分 |
 | `away_score` | Integer | 客队比分 |
-| `status` | String NOT NULL | 状态（默认 FINISHED） |
-| `pool_status` | String | 奖池状态 |
+| `pool_status` | String | 奖池状态（Payout/Refund） |
+| `kickoff_time` | DateTime | 开赛时间（matchInfo.matchDateTime） |
+| `single_spf` / `single_rqspf` / `single_ttg` / `single_hafu` / `single_crs` | Integer | 五池单关标记（0/1） |
 | `scraped_at` | DateTime | 抓取时间 |
 
-索引：`business_date`、`match_date`、`status`。
+索引：`business_date`、`match_date`、`league`、`(home_team, away_team)`。
 
-#### `jingcai_teams` — 球队映射（约 0.3 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `name` | String NOT NULL | 球队名 |
-| `short_name` | String | 简称 |
-| `sporttery_id` | Integer UNIQUE | 体彩 ID |
-| `uniform_id` | Integer | 统一 ID |
-
-#### `jingcai_leagues` — 联赛映射（约 134 行）
+#### `jingcai_votes` — 投票横表
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `name` | String NOT NULL | 联赛名 |
-| `short_name` | String | 简称 |
-| `sporttery_id` | Integer UNIQUE | 体彩 ID |
-| `uniform_id` | Integer | 统一 ID |
-| `season_id` | Integer | 赛季 ID |
-| `season_name` | String | 赛季名 |
-
-#### `jingcai_odds` — 赔率汇总（约 34.9 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
 | `match_id` | Integer NOT NULL | 比赛 ID |
-| `odds_type` | String NOT NULL | 赔率类型（SPF/RQSPF/CRS/TTG/HAFU） |
-| `snapshot_at` | DateTime | 快照时间 |
-| `home` | Float | 主胜赔 |
-| `draw` | Float | 平局赔 |
-| `away` | Float | 客胜赔 |
-| `handicap` | String | 让球盘 |
-| `options` | Text | 选项明细（比分/总进球等） |
+| `pool` | String NOT NULL | HAD / RQSPF |
+| `goal_line` | Integer | 仅 RQSPF 有值（-2..+2） |
+| `odds_home` / `odds_draw` / `odds_away` | Numeric | 三向赔率 |
+| `support_rate_home` / `support_rate_draw` / `support_rate_away` | Numeric | 支持率（"27%"→0.27） |
+| `probability_home` / `probability_draw` / `probability_away` | Numeric | 命中概率（"26%"→0.26） |
+| `error_home` / `error_draw` / `error_away` | Numeric | error = 支持率 − 概率（可为负） |
+| `voters_home` / `voters_draw` / `voters_away` | Integer | 投票人数 |
+| `psy_error` | Integer | 心理误差档位 0/1/2（语义见定稿文档） |
+| `result` | String | 结果（home/draw/away） |
 
-唯一约束 `(match_id, odds_type)`。
+唯一约束 `(match_id, pool)`。
 
-#### `jingcai_odds_spf` — 胜平负明细快照（约 26.1 万行）
+#### `jingcai_odds_spf` — 胜平负明细快照
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
 | `match_id` | Integer NOT NULL | 比赛 ID |
-| `snapshot_at` | DateTime NOT NULL | 快照时间 |
-| `update_date` | String | 更新日期 |
-| `update_time` | String | 更新时间 |
-| `home` | Float | 主胜赔 |
-| `draw` | Float | 平局赔 |
-| `away` | Float | 客胜赔 |
+| `snapshot_at` | DateTime NOT NULL | 快照时间（updateDate+updateTime） |
+| `odds_home` / `odds_draw` / `odds_away` | Numeric | 三向赔率 |
 
 唯一约束 `(match_id, snapshot_at)`。
 
-#### `jingcai_odds_rqspf` — 让球胜平负明细快照（约 26.8 万行）
+#### `jingcai_odds_rqspf` — 让球胜平负明细快照
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
 | `match_id` | Integer NOT NULL | 比赛 ID |
 | `snapshot_at` | DateTime NOT NULL | 快照时间 |
-| `update_date` | String | 更新日期 |
-| `update_time` | String | 更新时间 |
-| `home` | Float | 主胜赔 |
-| `draw` | Float | 平局赔 |
-| `away` | Float | 客胜赔 |
-| `handicap` | String | 让球盘 |
+| `goal_line` | Integer | 让球盘（-2..+2） |
+| `odds_home` / `odds_draw` / `odds_away` | Numeric | 三向赔率 |
 
 唯一约束 `(match_id, snapshot_at)`。
 
-#### `jingcai_odds_crs` — 比分明细快照（约 13.9 万行）
+#### `jingcai_odds_ttg` — 总进球明细快照
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
 | `match_id` | Integer NOT NULL | 比赛 ID |
 | `snapshot_at` | DateTime NOT NULL | 快照时间 |
-| `options` | Text | 比分选项及赔率 |
+| `odds_0` .. `odds_7` | Numeric | 0 球 .. 7+ 球赔率 |
 
 唯一约束 `(match_id, snapshot_at)`。
 
-#### `jingcai_odds_ttg` — 总进球明细快照（约 14.5 万行）
+#### `jingcai_odds_hafu` — 半全场明细快照
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
 | `match_id` | Integer NOT NULL | 比赛 ID |
 | `snapshot_at` | DateTime NOT NULL | 快照时间 |
-| `options` | Text | 进球数选项及赔率 |
+| `odds_hh` .. `odds_aa` | Numeric | 9 种半全场组合赔率 |
 
 唯一约束 `(match_id, snapshot_at)`。
 
-#### `jingcai_odds_hafu` — 半全场明细快照（约 15.8 万行）
+#### `jingcai_odds_crs` — 比分明细快照
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
 | `match_id` | Integer NOT NULL | 比赛 ID |
 | `snapshot_at` | DateTime NOT NULL | 快照时间 |
-| `options` | Text | 半全场选项及赔率 |
+| `odds_s00s00` .. `odds_s05s05` | Numeric | 28 个具体比分赔率 |
+| `odds_s-1sh` / `odds_s-1sd` / `odds_s-1sa` | Numeric | 胜其他 / 平其他 / 负其他 |
 
 唯一约束 `(match_id, snapshot_at)`。
 
-#### `jingcai_pools` — 奖池（约 32.6 万行）
+#### `jingcai_pools` — 奖池
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
 | `match_id` | Integer NOT NULL | 比赛 ID |
-| `code` | String NOT NULL | 玩法代码 |
-| `combination` | String | 组合 |
+| `pool` | String NOT NULL | 玩法代码（HAD/HHAD/CRS/TTG/HAFU） |
+| `combination` | String | 组合（"H"/"3:1"/"4"/"H:H"） |
 | `combination_desc` | String | 组合描述 |
-| `odds` | Float | 赔率 |
-| `goal_line` | String | 进球线 |
+| `goal_line` | Integer | 进球线（仅 HHAD 有值） |
+| `odds` | Numeric | 最终赔率 |
 | `pool_id` | Integer | 奖池 ID |
-| `pool_totals` | String | 奖池总额 |
-| `refund_status` | String | 退款状态 |
+| `pool_totals` | BigInt | 奖池总额（0=未结算/无总额） |
 
-唯一约束 `(match_id, code)`。
-
-#### `jingcai_standings` — 积分榜（约 35.4 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `match_id` | Integer NOT NULL | 比赛 ID |
-| `team_type` | String NOT NULL | home/away |
-| `view` | String NOT NULL | 榜单视图（总/主/客） |
-| `team_name` | String | 队名 |
-| `team_id` | Integer | 队 ID |
-| `ranking` | Integer | 排名 |
-| `points` | Integer | 积分 |
-| `played` | Integer | 已赛场次 |
-| `wins` | Integer | 胜 |
-| `draws` | Integer | 平 |
-| `losses` | Integer | 负 |
-| `goals_for` | Integer | 进球 |
-| `goals_against` | Integer | 失球 |
-| `goal_diff` | Integer | 净胜球 |
-| `win_probability` | String | 获胜概率 |
-| `phase_name` | String | 阶段名 |
-
-唯一约束 `(match_id, team_type, view)`。
-
-#### `jingcai_h2h` — 历史交锋（约 42.1 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `match_id` | Integer NOT NULL | 比赛 ID |
-| `match_date` | Date | 比赛日期 |
-| `home_team_id` | Integer | 主队 ID |
-| `away_team_id` | Integer | 客队 ID |
-| `home_score` | Integer | 主队比分 |
-| `away_score` | Integer | 客队比分 |
-| `half_home_score` | Integer | 半场主队比分 |
-| `half_away_score` | Integer | 半场客队比分 |
-| `season_id` | Integer | 赛季 ID |
-| `tournament_id` | Integer | 赛事 ID |
-| `winning_team` | String | 获胜方 |
-
-唯一约束 `(match_id, match_date, home_team_id, away_team_id)`。
-
-#### `jingcai_recent_results` — 近期赛果（约 24.3 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `team_uniform_id` | Integer NOT NULL | 球队统一 ID |
-| `match_date` | Date | 比赛日期 |
-| `opponent_uniform_id` | Integer | 对手统一 ID |
-| `home_score` | Integer | 主队比分 |
-| `away_score` | Integer | 客队比分 |
-| `half_home_score` | Integer | 半场主队比分 |
-| `half_away_score` | Integer | 半场客队比分 |
-| `result` | String | 结果（胜/平/负） |
-| `season_id` | Integer | 赛季 ID |
-| `tournament_id` | Integer | 赛事 ID |
-| `source_match_id` | Integer | 源比赛 ID |
-
-唯一约束 `(team_uniform_id, match_date, source_match_id)`。
-
-#### `jingcai_fixtures` — 未来赛程（约 0.5 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `team_uniform_id` | Integer NOT NULL | 球队统一 ID |
-| `match_date` | DateTime | 开赛时间 |
-| `opponent_uniform_id` | Integer | 对手统一 ID |
-| `gameweek` | String | 轮次 |
-| `season_id` | Integer | 赛季 ID |
-| `tournament_id` | Integer | 赛事 ID |
-| `source_match_id` | Integer | 源比赛 ID |
-
-唯一约束 `(team_uniform_id, match_date, source_match_id)`。
-
-#### `jingcai_injuries` — 伤病名单（约 13.9 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `match_id` | Integer NOT NULL | 比赛 ID |
-| `team_type` | String NOT NULL | home/away |
-| `person_id` | Integer | 人员 ID |
-| `person_name` | String | 姓名 |
-| `position_code` | String | 位置代码 |
-| `position_desc` | String | 位置描述 |
-| `injury_flag` | Integer | 伤病标记 |
-| `suspension_flag` | Integer | 停赛标记 |
-| `appearance_cnt` | Integer | 出场次数 |
-| `started_cnt` | Integer | 首发次数 |
-| `uniform_no` | String | 球衣号 |
-
-唯一约束 `(match_id, team_type, person_id)`。
-
-#### `jingcai_players` — 球员数据（约 38.2 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `match_id` | Integer NOT NULL | 比赛 ID |
-| `team_type` | String NOT NULL | home/away |
-| `person_id` | Integer | 人员 ID |
-| `person_name` | String | 姓名 |
-| `position_code` | String | 位置代码 |
-| `position_desc` | String | 位置描述 |
-| `goal_cnt` | Integer | 进球数 |
-| `assist_cnt` | Integer | 助攻数 |
-| `appearance_cnt` | Integer | 出场次数 |
-| `started_cnt` | Integer | 首发次数 |
-| `injury_flag` | Integer | 伤病标记 |
-| `suspension_flag` | Integer | 停赛标记 |
-| `uniform_no` | String | 球衣号 |
-
-唯一约束 `(match_id, team_type, person_id)`。
-
-#### `jingcai_season_features` — 赛季特征（约 6.6 万行）
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `match_id` | Integer UNIQUE | 比赛 ID |
-| `home_team` | String | 主队名 |
-| `away_team` | String | 客队名 |
-| `goal_avg_home` | Float | 主队场均进球 |
-| `goal_avg_away` | Float | 客队场均进球 |
-| `loss_goal_avg_home` | Float | 主队场均失球 |
-| `loss_goal_avg_away` | Float | 客队场均失球 |
-| `recent_home_wins` | Integer | 主队近期胜 |
-| `recent_home_draws` | Integer | 主队近期平 |
-| `recent_home_losses` | Integer | 主队近期负 |
-| `recent_away_wins` | Integer | 客队近期胜 |
-| `recent_away_draws` | Integer | 客队近期平 |
-| `recent_away_losses` | Integer | 客队近期负 |
-| `data` | Text | 原始数据 |
-
-#### `jingcai_import_files` — 导入文件记录
-
-| 字段名 | 类型 | 中文说明 |
-| --- | --- | --- |
-| `id` | Integer PK | 自增主键 |
-| `file_path` | String UNIQUE NOT NULL | 源文件路径 |
-| `size` | Integer | 文件大小 |
-| `mtime` | Float | 修改时间戳 |
-| `status` | String NOT NULL | 状态（默认 ok） |
-| `imported_at` | DateTime NOT NULL | 导入时间 |
+唯一约束 `(match_id, pool)`。
 
 ### 7.3 球探库
 
-```sql
--- ============================================
--- titan007 库：球探爬虫数据
--- ============================================
+球探源库 schema **已全部定稿**，详见 [`docs/titan007-database.md`](titan007-database.md)（含每张表的完整 DDL、字段来源与转化、盘口映射表、已核实数据规模）。
 
--- 赛程
-CREATE TABLE schedules (
-    schedule_id     INTEGER NOT NULL,
-    competition_id  INTEGER NOT NULL,
-    competition_name_cn TEXT,
-    competition_name_en TEXT,
-    season          TEXT NOT NULL,
-    is_cup          BOOLEAN DEFAULT FALSE,
-    group_name      TEXT,
-    round_name      TEXT,
-    match_time      TIMESTAMPTZ,
-    home_team_id    INTEGER,
-    away_team_id    INTEGER,
-    home_team       TEXT,
-    away_team       TEXT,
-    home_team_en    TEXT,
-    away_team_en    TEXT,
-    full_score      TEXT,
-    half_score      TEXT,
-    status          INTEGER,
-    data_raw        JSONB,
-    scraped_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (schedule_id, competition_id, season)
-);
-CREATE INDEX idx_schedules_time ON schedules (match_time);
-CREATE INDEX idx_schedules_comp_season ON schedules (competition_id, season);
+共 **9 张表**（数据来自 `titan007_pro/data/` 的 schedule / analysis / odds，约 47 万 JSON 文件）：
 
--- 分析数据（赛前简报/阵容/伤停/积分榜等，JSONB body）
-CREATE TABLE analysis (
-    schedule_id     INTEGER PRIMARY KEY,
-    competition_id  INTEGER,
-    season          TEXT,
-    data            JSONB NOT NULL,
-    scraped_at      TIMESTAMPTZ DEFAULT now()
-);
+| 分类 | 表 | 说明 |
+|---|---|---|
+| 维度 | `titan_competitions` | 联赛（98 行） |
+| 维度 | `titan_teams` | 球队（数千行） |
+| 维度 | `titan_companies` | 公司（9 行，欧赔 5 家 + 亚盘/大小球 4 家） |
+| 主表 | `titan_schedules` | 赛程（约 8 万场，比分/状态/主客队 ID+名冗余） |
+| 详情 | `titan_euro_odds` | 欧赔快照（打平，约 970 万行，5 家公司） |
+| 详情 | `titan_asian_odds` | 亚盘快照（打平，约 1,190 万行，4 家公司，line 中文+数值双列） |
+| 详情 | `titan_over_under_odds` | 大小球快照（打平，约 1,510 万行，4 家公司 × full/half） |
+| 详情 | `titan_analysis` | 赛前分析（5.4 万行，衍生数据 JSONB + 不可推导标量 TEXT） |
 
--- 赔率（统一表：亚盘 / 大小球 / 欧赔）
-CREATE TABLE odds (
-    schedule_id     INTEGER NOT NULL,
-    company_id      INTEGER NOT NULL,
-    company_name    TEXT,
-    odds_type       TEXT NOT NULL,    -- asian / over_under / european
-    odds_subtype    TEXT,             -- full / half（欧赔为 NULL）
-    source          TEXT NOT NULL,    -- titan / nowscore
-    changes         JSONB NOT NULL,   -- 赔率变化数组
-    data_raw        JSONB,
-    fetched_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (schedule_id, company_id, odds_type, odds_subtype)
-);
-```
-
-> 设计说明：把 47 万 JSON 文件压成 3 张表。`changes` 存赔率变化序列（JSONB），既满足走势查询，也避免把每条变化拆成一行导致的表爆炸。若后续需要按时间筛选赔率变化，再考虑拆行物化视图。
+**关键设计约定**（详见定稿文档"〇、设计全局原则"）：
+- 所有表**软关联（无 FOREIGN KEY）**，查询用 LEFT JOIN。
+- **ID 和名都存**：schedules / analysis 冗余球队、联赛名称列与 ID 列并存，查询免 JOIN；赔率表只存 `schedule_id`，不冗余联赛信息。
+- **赔率按类型分 3 张表**（欧赔/亚盘/大小球 changes 结构不同），公司用 `company_id` 列区分，**不按公司拆表**。
+- **赔率打平 + append-only**：`changes[]` 拆行，**`id BIGSERIAL` 代理主键 + 业务唯一键（`change_time + 盘口 + 赔率值`）**，不做 JSONB 母表；每次抓取仅插入新变动（`ON CONFLICT DO NOTHING`），绝不 UPDATE/DELETE 旧行（详见定稿文档"十二、增量写入与一致性设计"）。
+- `changes[].time` 为球探原生格式（`M-d HH:MM` 无年份），导入脚本推断年份转 TIMESTAMPTZ；`(初盘)` 后缀由 `is_initial` 承载。
+- 亚盘盘口中文存 `line_raw` + 映射值 `line_value` 双列；映射 dict 预置 `-7~+7` 全网格（0.25 步进）+ 简写变体，规则解析兜底。
+- 欧赔恒 full 无 subtype 列；亚盘预置 subtype 列（为将来 half 预留）；大小球 full/half 双 subtype。
+- analysis 的 recent/h2h/standings/lineup 整存 JSONB（衍生数据，聚合引擎可自算），preview/tip/weather 用 TEXT 列。
 
 ---
 
@@ -1393,7 +1163,7 @@ volumes:
 | 数据源 | JSON 文件数 | 预期入库表数 | 预期行数 |
 |---|---|---|---|
 | Sofascore | ~88,000 | 3 张 | 赛程 ~2 万行/季 × 10 季 |
-| 竞彩 | ~69,700 | 17 张 | 约 380 万行（已迁移） |
+| 竞彩 | ~72,600 | 8 张 | 约 201 万行（按 10 万场估算） |
 | 球探 | ~470,000 | 3 张 | 赔率 41.5 万 + 分析 5.4 万 + 赛程 387 |
 
 ## 附录 B：关键名词
