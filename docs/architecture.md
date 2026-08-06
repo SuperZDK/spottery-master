@@ -39,7 +39,7 @@
 | `spottery_pro` | 主平台（前后端+数据库） | FastAPI + React + PostgreSQL | 已有 17 张竞彩表（约 380 万行） |
 | `crawler` | Sofascore 爬虫 | TS + Playwright | JSON 文件（约 8.8 万） |
 | `spottery/scrapers` | 竞彩爬虫 | TS + Puppeteer | JSON 文件（约 7 万） |
-| `titan007_pro` | 球探爬虫 | Python + Playwright | JSON 文件（约 47 万） |
+| `titan007_pro` | 球探爬虫 | Python + Playwright | JSON 文件（约 51.5 万） |
 
 当前问题：
 - 三个爬虫各自把数据落盘为 JSON 文件，主平台通过**硬编码绝对路径**（`config.py` 里的 `D:\data\...\scrapers\data\jingcai`）去读，跨仓库文件耦合脆弱。
@@ -91,8 +91,8 @@
 
 - **反爬**：`puppeteer-extra-plugin-stealth`（JS 生态最成熟的 stealth 方案）；随机视口 1280~1479×720~919；3 个 Chrome UA 轮换；代理池（已实现未接入）；超时 30s；故障恢复（重置浏览器 + 10s 等待）；限速 500~3000ms。
 - **数据**：
-  - daily：`data/jingcai/daily/{YYYY-MM-DD}.json`，3,772 个。
-  - 详情：`data/jingcai/matches/{matchId}.json`，65,939 个，含 oddsHistory（HAD/HHAD/TTG/CRS/HAFU 赔率历史）+ matchInfo + recentResults + seasonFeatures + injuries + standings + players + fixtures + headToHead。
+  - daily：`data/jingcai/daily/{YYYY-MM-DD}.json`，3,779 个。
+  - 详情：`data/jingcai/matches/{matchId}.json`，76,992 个，含 oddsHistory（HAD/HHAD/TTG/CRS/HAFU 赔率历史）+ matchInfo + recentResults + seasonFeatures + injuries + standings + players + fixtures + headToHead。
 - **API**：`webapi.sporttery.cn/gateway/uniform/football`，12 个 endpoint。
 - **调度**：node-cron 常驻进程，4 个定时任务（schedule 每 30min / result 每 60min / odds 每 15min）；另有历史批量爬取 run-crawl.ts 两阶段。
 - **后端推送**：`api-client.ts` 已实现（POST /scraper/matches、/scraper/odds，X-API-Key 认证，3 次指数退避），但**尚未被任何爬虫调用**。
@@ -102,9 +102,9 @@
 
 - **反爬**：146 条真实 UA 轮换；`zh-CN` locale + `Asia/Shanghai` 时区；随机视口 1200~1400×800~900；Referer 校验（zq/vip/1x2/nowscore 各不同）；随机延迟 0.5~2s；JS 文件 URL 加随机 `?version=` 参数规避缓存；自动重试（默认 2 次）；**GBK 解码**（JS 数据文件编码）。
 - **数据**：
-  - schedule：`data/schedule/`，387 文件。
-  - analysis：`data/analysis/`，54,345 文件。
-  - odds：`data/odds/asian|over_under|european/`，共 41.5 万文件。
+  - schedule：`data/schedule/`，1,110 文件（leagues 422 + cups 688）。
+  - analysis：`data/analysis/`，55,314 文件。
+  - odds：`data/odds/asian|over_under|european/`，共 459,333 文件。
 - **Pipeline**：schedule / analysis / asian / ou / euro / live 六个，live 由 systemd timer 每 5 分钟触发（P0/P1 节流）。
 - **文件系统耦合**：`core/odds_store.py`（save/load）、`core/utils.py`（schedule/match_index/latest_seasons）、各 pipeline inline `json.dump` 共 12 处写入 + 8 处读取。
 
@@ -377,7 +377,7 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 | 维度 | `leagues` | 联赛（29 行） |
 | 维度 | `seasons` | 赛季（309 行） |
 | 维度 | `teams` | 球队（2,159 行） |
-| 主表 | `matches` | 赛程（82,288 场，比分/状态/主客队） |
+| 主表 | `schedules` | 赛程（82,288 场，比分/状态/主客队） |
 | 字典 | `status_codes` / `cup_round_types` / `round_prefixes` | 状态码 / 杯赛轮次 / 阶段标签 |
 | 详情 | `match_details` | 裁判/球场/上座/阵容/赛前排位 |
 | 详情 | `match_statistics` | 球队技术统计（is_home × period，~39 万行） |
@@ -389,9 +389,9 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 
 **关键设计约定**（详见定稿文档"〇、设计全局原则"）：
 - 所有表**软关联（无 FOREIGN KEY）**，查询用 LEFT JOIN。
-- 明细表统一冗余 `league_id/season_id` 作查询入口，配 `(league_id, season_id, ...)` 复合索引，免 JOIN matches 即可按赛事/赛季过滤。
+- 明细表统一冗余 `league_id/season_id` 作查询入口，配 `(league_id, season_id, ...)` 复合索引，免 JOIN schedules 即可按赛事/赛季过滤。
 - `match_incidents`（比赛事件）**确认不建表**，进球/红牌等从比分与统计推断。
-- 比分/状态以 `matches` 表（schedules_v3）为准；详情表不重复存比分状态。
+- 比分/状态以 `schedules` 表（schedules_v3）为准；详情表不重复存比分状态。
 
 ### 7.2 竞彩库
 
@@ -401,13 +401,13 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 
 | 表 | 行数（10 万场估算） | 说明 |
 |---|---|---|
-| `jingcai_matches` | 100,000 | 竞彩比赛主体（赛程 + 比分 + 开赛时间 + 单关标记） |
-| `jingcai_votes` | 200,000 | 投票横表（HAD/RQSPF 两池，含 psy_error 心理误差档位） |
-| `jingcai_odds_spf` | 338,000 | 胜平负赔率快照（无让球线） |
-| `jingcai_odds_rqspf` | 339,000 | 让球胜平负赔率快照（唯一含 goal_line） |
-| `jingcai_odds_ttg` | 188,000 | 总进球赔率快照（odds_0..odds_7） |
-| `jingcai_odds_hafu` | 184,000 | 半全场赔率快照（9 组合） |
-| `jingcai_odds_crs` | 166,000 | 比分赔率快照（31 列平铺） |
+| `jingcai_schedules` | 100,000 | 竞彩比赛主体（赛程 + 比分 + 开赛时间 + 单关标记） |
+| `jingcai_votes` | 200,000 | 投票时间序列表（HAD/RQSPF 两池基线，含 psy_error 心理误差档位；未来 append 轨迹快照） |
+| `jingcai_odds_spf` | 380,000 | 胜平负赔率快照（无让球线） |
+| `jingcai_odds_rqspf` | 392,000 | 让球胜平负赔率快照（唯一含 goal_line，-3..+3） |
+| `jingcai_odds_ttg` | 211,000 | 总进球赔率快照（odds_0..odds_7） |
+| `jingcai_odds_hafu` | 230,000 | 半全场赔率快照（9 组合） |
+| `jingcai_odds_crs` | 208,000 | 比分赔率快照（31 列平铺） |
 | `jingcai_pools` | 498,000 | 奖池（五池各一行） |
 
 迁移方式：全量重建，按 `scrapers/data/jingcai` 解析导入（旧 18 表不迁移，其中 10 张确认不建）。
@@ -418,9 +418,11 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 - 字符串数值一律转数值存储（赔率/支持率/概率/error）；`error = supportRate − probability`，可为负。
 - 恒值/可推导字段不落库：`*f` 变动方向、`oddsType`（恒 F）、`lineStatus`/`oddsGoalLine`（恒空）、`refundStatus`（恒 0）。
 - HAD/TTG/HAFU/CRS 四池 `goalLine` 恒空，故 `goal_line` 仅出现在 `jingcai_odds_rqspf` 与 `jingcai_pools`。
-- 旧 18 表中的 `standings` / `h2h` / `recent_results` / `fixtures` / `injuries` / `players` / `season_features` / `teams` / `leagues` / `import_files` **确认不建表**（衍生数据，详见"十、不落库清单"）。
+- 旧 18 表中的 `standings` / `h2h` / `recent_results` / `fixtures` / `injuries` / `players` / `season_features` / `teams` / `leagues` / `import_files` **确认不建表**（衍生数据，详见"十二、不落库清单"）。
+- **投票为时间序列**：`jingcai_votes` 用 `id BIGSERIAL` 代理主键 + `UNIQUE(match_id, pool, snapshot_at)`；历史基线 snapshot_at = 开售日停售时间点（普通日 22:00 / 周末 23:00，按开售日星期判定），未来复用 getMatchCalculatorV1 接口、赔率有变化才 append（详见定稿文档 votes 设计要点）。
+- **索引原则**：只为过滤/排序/连接列建索引；`match_id` 已是各表 PK/UNIQUE 最左列，不额外建 `idx_*_match_id`；时间序列表走 PK `(match_id, snapshot_at)`。
 
-#### `jingcai_matches` — 竞彩比赛主体
+#### `jingcai_schedules` — 竞彩比赛主体
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
@@ -431,22 +433,24 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 | `home_team` | String NOT NULL | 主队名 |
 | `away_team` | String NOT NULL | 客队名 |
 | `league` | String | 联赛名（已验证 = matchInfo.tournamentCnName） |
-| `home_score` | Integer | 主队比分 |
-| `away_score` | Integer | 客队比分 |
+| `home_score` | Integer | 主队比分（空=未开赛/未结算，推断状态） |
+| `away_score` | Integer | 客队比分（同上） |
 | `pool_status` | String | 奖池状态（Payout/Refund） |
-| `kickoff_time` | DateTime | 开赛时间（matchInfo.matchDateTime） |
+| `kickoff_time` | DateTime | 开赛时间（matchInfo.matchDateTime，已核实 100% 有值） |
 | `single_spf` / `single_rqspf` / `single_ttg` / `single_hafu` / `single_crs` | Integer | 五池单关标记（0/1） |
 | `scraped_at` | DateTime | 抓取时间 |
 
 索引：`business_date`、`match_date`、`league`、`(home_team, away_team)`。
 
-#### `jingcai_votes` — 投票横表
+#### `jingcai_votes` — 投票时间序列表
 
 | 字段名 | 类型 | 中文说明 |
 | --- | --- | --- |
+| `id` | BigInt PK（BIGSERIAL） | 代理主键 |
 | `match_id` | Integer NOT NULL | 比赛 ID |
 | `pool` | String NOT NULL | HAD / RQSPF |
-| `goal_line` | Integer | 仅 RQSPF 有值（-2..+2） |
+| `snapshot_at` | DateTime NOT NULL | 历史基线=开售日停售时间点；未来=抓取端时间戳 |
+| `goal_line` | Integer | 仅 RQSPF 有值（-3..+3） |
 | `odds_home` / `odds_draw` / `odds_away` | Numeric | 三向赔率 |
 | `support_rate_home` / `support_rate_draw` / `support_rate_away` | Numeric | 支持率（"27%"→0.27） |
 | `probability_home` / `probability_draw` / `probability_away` | Numeric | 命中概率（"26%"→0.26） |
@@ -455,7 +459,7 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 | `psy_error` | Integer | 心理误差档位 0/1/2（语义见定稿文档） |
 | `result` | String | 结果（home/draw/away） |
 
-唯一约束 `(match_id, pool)`。
+唯一约束 `(match_id, pool, snapshot_at)`（时间序列，可存多次快照）。
 
 #### `jingcai_odds_spf` — 胜平负明细快照
 
@@ -473,7 +477,7 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 | --- | --- | --- |
 | `match_id` | Integer NOT NULL | 比赛 ID |
 | `snapshot_at` | DateTime NOT NULL | 快照时间 |
-| `goal_line` | Integer | 让球盘（-2..+2） |
+| `goal_line` | Integer | 让球盘（-3..+3） |
 | `odds_home` / `odds_draw` / `odds_away` | Numeric | 三向赔率 |
 
 唯一约束 `(match_id, snapshot_at)`。
@@ -528,24 +532,24 @@ Sofascore 源库 schema **已全部定稿**，详见 [`docs/sofascore-database.m
 
 球探源库 schema **已全部定稿**，详见 [`docs/titan007-database.md`](titan007-database.md)（含每张表的完整 DDL、字段来源与转化、盘口映射表、已核实数据规模）。
 
-共 **9 张表**（数据来自 `titan007_pro/data/` 的 schedule / analysis / odds，约 47 万 JSON 文件）：
+共 **8 张表**（数据来自 `titan007_pro/data/` 的 schedule / analysis / odds，实测约 51.5 万 JSON 文件）：
 
 | 分类 | 表 | 说明 |
 |---|---|---|
 | 维度 | `titan_competitions` | 联赛（98 行） |
 | 维度 | `titan_teams` | 球队（数千行） |
 | 维度 | `titan_companies` | 公司（9 行，欧赔 5 家 + 亚盘/大小球 4 家） |
-| 主表 | `titan_schedules` | 赛程（约 8 万场，比分/状态/主客队 ID+名冗余） |
-| 详情 | `titan_euro_odds` | 欧赔快照（打平，约 970 万行，5 家公司） |
-| 详情 | `titan_asian_odds` | 亚盘快照（打平，约 1,190 万行，4 家公司，line 中文+数值双列） |
-| 详情 | `titan_over_under_odds` | 大小球快照（打平，约 1,510 万行，4 家公司 × full/half） |
-| 详情 | `titan_analysis` | 赛前分析（5.4 万行，衍生数据 JSONB + 不可推导标量 TEXT） |
+| 主表 | `titan_schedules` | 赛程（297,120 场，全量赛事中心；比分/状态/主客队 ID+名冗余） |
+| 详情 | `titan_euro_odds` | 欧赔快照（打平，≈613 万行，5 家公司） |
+| 详情 | `titan_asian_odds` | 亚盘快照（打平，≈665 万行，4 家公司，line 中文+数值双列） |
+| 详情 | `titan_over_under_odds` | 大小球快照（打平，≈62 万行，4 家公司 × full/half） |
+| 详情 | `titan_analysis` | 赛前分析（55,314 行，衍生数据 JSONB + 不可推导标量 TEXT） |
 
 **关键设计约定**（详见定稿文档"〇、设计全局原则"）：
 - 所有表**软关联（无 FOREIGN KEY）**，查询用 LEFT JOIN。
 - **ID 和名都存**：schedules / analysis 冗余球队、联赛名称列与 ID 列并存，查询免 JOIN；赔率表只存 `schedule_id`，不冗余联赛信息。
 - **赔率按类型分 3 张表**（欧赔/亚盘/大小球 changes 结构不同），公司用 `company_id` 列区分，**不按公司拆表**。
-- **赔率打平 + append-only**：`changes[]` 拆行，**`id BIGSERIAL` 代理主键 + 业务唯一键（`change_time + 盘口 + 赔率值`）**，不做 JSONB 母表；每次抓取仅插入新变动（`ON CONFLICT DO NOTHING`），绝不 UPDATE/DELETE 旧行（详见定稿文档"十二、增量写入与一致性设计"）。
+- **赔率打平 + append-only**：`changes[]` 拆行，**`id BIGSERIAL` 代理主键 + 业务唯一键（`change_time + 盘口 + 赔率值`）**，不做 JSONB 母表；每次抓取仅插入新变动（`ON CONFLICT DO NOTHING`），绝不 UPDATE/DELETE 旧行（详见定稿文档"十四、增量写入与一致性设计"）。
 - `changes[].time` 为球探原生格式（`M-d HH:MM` 无年份），导入脚本推断年份转 TIMESTAMPTZ；`(初盘)` 后缀由 `is_initial` 承载。
 - 亚盘盘口中文存 `line_raw` + 映射值 `line_value` 双列；映射 dict 预置 `-7~+7` 全网格（0.25 步进）+ 简写变体，规则解析兜底。
 - 欧赔恒 full 无 subtype 列；亚盘预置 subtype 列（为将来 half 预留）；大小球 full/half 双 subtype。
@@ -1163,8 +1167,8 @@ volumes:
 | 数据源 | JSON 文件数 | 预期入库表数 | 预期行数 |
 |---|---|---|---|
 | Sofascore | ~88,000 | 3 张 | 赛程 ~2 万行/季 × 10 季 |
-| 竞彩 | ~72,600 | 8 张 | 约 201 万行（按 10 万场估算） |
-| 球探 | ~470,000 | 3 张 | 赔率 41.5 万 + 分析 5.4 万 + 赛程 387 |
+| 竞彩 | ~80,800 | 8 张 | 约 222 万行（按 10 万场估算） |
+| 球探 | ~515,757 | 8 张 | 赔率 ≈1,340 万 + 分析 55,314 + 赛程 297,120 |
 
 ## 附录 B：关键名词
 

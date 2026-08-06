@@ -1,9 +1,10 @@
 # 球探源库数据库设计（已定稿部分）
 
 > 本文档记录 **titan007 库**已确认的数据表设计与数据来源映射，供开发、分析与后续建模参考。
-> 当前定稿范围：**球探源库全部定稿** —— 4 张维度表（titan_competitions / titan_teams / titan_companies）+ 5 张事实表（titan_schedules / titan_euro_odds / titan_asian_odds / titan_over_under_odds / titan_analysis）。
+> 当前定稿范围：**球探源库全部定稿** —— 3 张维度表（titan_competitions / titan_teams / titan_companies）+ 5 张事实表（titan_schedules / titan_euro_odds / titan_asian_odds / titan_over_under_odds / titan_analysis），共 8 张表。
 > 所有表均采用**软关联（无 FOREIGN KEY）**，字段来源与转化方式见各表"字段来源与转化"小节。
-> 数据来源：`titan007_pro` 爬虫仓库 `data/` 目录下的 schedule / analysis / odds 三部分（47 万 JSON 文件）。
+> 数据来源：`titan007_pro` 爬虫仓库 `data/` 目录下的 schedule / analysis / odds 三部分（实测约 51.5 万 JSON 文件，详见"二、数据来源文件"）。
+> 各表支撑的业务需求见"一、业务需求与设计依据"。
 
 ---
 
@@ -14,21 +15,118 @@
 3. **赔率按类型分 3 张表**：欧赔 / 亚盘 / 大小球的 `changes[]` 结构完全不同，是三个逻辑实体 → 各自平铺一张表（类比竞彩库 SPF/RQSPF/CRS 分池）。**公司用 `company_id` 列区分，不拆表**。
 4. **赔率打平 + append-only**：`changes[]` 拆成行（一行 = 一场 × 一家公司 × 一个时间点的一次赔率变动快照），不做 JSONB 母表，支撑跨公司 / 跨时间 SQL 分析。赔率表是**只增不改**的历史日志：每次抓取仅插入新变化，绝不 UPDATE/DELETE 旧行；幂等靠业务唯一键（`INSERT ... ON CONFLICT DO NOTHING`）。
 5. **代理主键 + 业务唯一键**：赔率表用 `id BIGSERIAL` 作无业务含义的代理主键；真正管去重/幂等的是业务唯一键（= 球探 `change_key`：`change_time + 盘口 + 赔率值`）。`change_time` 同一时刻可能存在多条真实变动（实测 40.6% 文件），故不单独做主键。
-5. **恒值字段不落库**：欧赔恒 `full` 无 subtype 列；`(初盘)` 后缀与 `is_initial` 语义重复，丢弃；亚盘/大小球 `subtype` 列预置（亚盘现在恒 full，为将来 half 预留）。
-6. **字符串数值一律转数值存储**：赔率/概率/kelly/返还率 → `NUMERIC`；亚盘盘口中文 → `line_raw TEXT` 保真 + `line_value NUMERIC` 映射值双列。
-7. **时间标准化**：赔率 `changes[].time` 是球探原生格式（`M-d HH:MM`，无年份），导入脚本统一推断年份转 `TIMESTAMPTZ`。
-8. **衍生数据整存 JSONB**：analysis 的 recent/h2h/standings/lineup 是赛前简报快照（可推导数据），整存 JSONB 保留，不拆明细表；不可推导标量（preview/tip/weather/version）用 TEXT 列。
-9. **自增主键**：需要自增的列用 `BIGSERIAL`，删除行后序列值不复用、后续值不变化。已有天然主键（schedule_id 等）的列直接用业务键。
+6. **恒值字段不落库**：欧赔恒 `full` 无 subtype 列；`(初盘)` 后缀与 `is_initial` 语义重复，丢弃；亚盘/大小球 `subtype` 列预置（亚盘现在恒 full，为将来 half 预留）。
+7. **字符串数值一律转数值存储**：赔率/概率/kelly/返还率 → `NUMERIC`；亚盘盘口中文 → `line_raw TEXT` 保真 + `line_value NUMERIC` 映射值双列。
+8. **时间标准化**：赔率 `changes[].time` 是球探原生格式（`M-d HH:MM`，无年份），导入脚本统一推断年份转 `TIMESTAMPTZ`。
+9. **衍生数据整存 JSONB**：analysis 的 recent/h2h/standings/lineup 是赛前简报快照（可推导数据），整存 JSONB 保留，不拆明细表；不可推导标量（preview/tip/weather/version）用 TEXT 列。
+10. **自增主键**：需要自增的列用 `BIGSERIAL`，删除行后序列值不复用、后续值不变化。已有天然主键（schedule_id 等）的列直接用业务键。
+11. **索引原则**：只为**过滤/排序/连接**列建索引（主键/UNIQUE 天然覆盖）；`schedule_id` 为赔率表 UNIQUE 最左列，不额外建 `idx_*_schedule_id`；纯展示列（比分、状态、轮次名）不建索引。球队按主/客单列索引（"某队全部比赛"跨主客两侧 OR 查询，复合索引无法加速）。
 
 ---
 
-## 一、数据来源文件
+## 一、业务需求与设计依据
+
+> 本章汇总球探库各表**支撑的业务需求**（页面功能 / 分析场景），作为建表、建索引、冗余字段的依据。每个需求标注支撑的表与关键索引，保证"需求 → 结构"可追溯。
+
+### 1.1 赛事中心赛程浏览（titan_schedules）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 按联赛+赛季浏览全量赛程 | 竞彩涉及赛事的 **2015-2026 全赛季**赛程（实测 **298,076 场**），按 联赛目录 × 赛季 组织，构建赛事中心 | `idx_titan_sched_comp_season (competition_id, season)` |
+| 按轮次/阶段完整展示 | 联赛按轮次（round_name）、杯赛按阶段（sub_league）分组展示：轮次 + 比赛时间 + 主队名 + 客队名 | `group_name` / `round_name` / `sub_league_id` |
+| 标记是否竞彩开设 | 赛程列表每行标记该场是否竞彩开设（有对应竞彩 match_id） | 跨库对齐（见 1.1.1 取数链路） |
+| 展示竞彩终赔 | 列表展示竞彩**胜平负终赔** / **让球胜平负终赔** | 跨库对齐（见 1.1.1） |
+| 展示是否单关 | 列表展示该场竞彩 SPF/RQSPF 是否单关 | 跨库对齐（见 1.1.1） |
+| 非竞彩场次 | 竞彩未开设的比赛**不爬详情/赔率**，列表只展示 schedule 已有数据 | schedules 全字段 |
+| 跨源找比赛 | 用其他源（竞彩/Sofascore）按比赛 ID、日期、主客队找到对应球探比赛 | `idx_titan_sched_time`、主/客队单列索引 |
+
+#### 1.1.1 赛事中心竞彩终赔取数链路（跨库对齐，不冗余到球探库）
+
+赛事中心列表需要展示竞彩开设标记、竞彩胜平负/让球胜平负终赔、单关标记，但**球探库不冗余竞彩数据**（保持源库纯净，符合"源库存原始、归一化在聚合层"原则）。取数链路：
+
+```
+赛事中心列表查询
+  1. titan_schedules 按联赛+赛季+轮次取赛程（全量 298,076 场）
+  2. 经 spottery.unified_matches.source_refs 对齐：
+       source_refs.titan007.schedule_id → 找到对应行的 jingcai.match_id
+  3. source_refs.jingcai 存在 → 该场为竞彩开设（① 标记）
+  4. 竞彩 match_id → jingcai_odds_spf / jingcai_odds_rqspf 最后快照 → 终赔（②③）
+  5. 竞彩 match_id → jingcai_schedules.single_spf / single_rqspf → 单关（④）
+```
+
+- **对齐载体**：`spottery.unified_matches.source_refs`（JSONB，已含 `titan007.schedule_id` / `jingcai.match_id` 双引用），由聚合引擎生成（日期+联赛+主客队匹配），用户手动维护映射表补漏。
+- **终赔口径**：`jingcai_odds_spf` / `jingcai_odds_rqspf` 中该 match_id 的 `snapshot_at` **最大**一行（临近开赛的最后赔率）。历史场次终赔固定；临赛场次随赔率更新。
+- **落地方式**：终赔可经 `spottery.aggregated_odds_history`（source='jingcai'，odds_type='SPF/RQSPF'）落库，列表页直接读聚合库，避免每次跨 3 库实时取快照最大行。
+- **不修改表设计**：titan007 / jingcai / spottery 三库现有表均满足，无需新增列。
+
+### 1.2 比赛详情页（titan_schedules + titan_analysis）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 详情覆盖范围 | **仅竞彩开设的比赛 + 指定主流联赛（五大联赛等）全赛季**完整爬取详情/赔率 | schedules PK(schedule_id) + analysis PK(schedule_id) |
+| 赛前分析展示 | 赛前简报 preview、AI 分析 tip、天气 weather | analysis TEXT 列 |
+| 主客近期战绩/交锋/积分榜/阵容 | 详情页展示 recent / h2h / standings / lineup | analysis JSONB 整存（衍生数据不拆表） |
+| 联赛视角聚合 | 按联赛+赛季统计有分析场次 | `idx_titan_analysis_comp (competition_id, season)` |
+
+### 1.3 欧赔走势（titan_euro_odds）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 欧赔变化轨迹 | 每场每公司赔率/概率/返还率/凯利按时间排序展示 | UNIQUE(schedule_id, company_id, change_time, home_win, draw, away_win) |
+| 跨公司对比 | 5 家公司（betfair/易胜博/Interwetten/威廉希尔/365）同场走势对比 | `idx_titan_euro_odds_comp (company_id)` |
+| 时间区间筛选 | 按快照时间过滤走势段 | `idx_titan_euro_odds_time (change_time)` |
+| 初盘识别 | 区分初盘与后续变动 | `is_initial` 列 |
+
+### 1.4 亚盘走势（titan_asian_odds）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 盘口变化轨迹 | 4 家公司（澳门/365/易胜博/明升）盘口 + 主客水位变化 | UNIQUE(schedule_id, company_id, subtype, change_time, line_raw, home_odds, away_odds) |
+| 盘口双形态 | 中文盘口（line_raw 保真）+ 数值映射（line_value）双列 | `line_raw` / `line_value` |
+| 即盘/早盘区分 | status（即/早） | `status` 列 |
+| half 扩展预留 | 当前恒 full，列已预置 | `subtype` 列 |
+
+### 1.5 大小球走势（titan_over_under_odds）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 大小球变化轨迹 | 4 家公司 × full/half，盘口 + 大/小水 | UNIQUE(schedule_id, company_id, subtype, change_time, line_raw, over_odds, under_odds) |
+| 即时盘口 | 比赛进行中即时盘口（score 多为空） | `score` / `status` 列 |
+
+### 1.6 赛前分析展示（titan_analysis）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 分析数据展示 | 按 schedule_id 查赛前简报、AI 分析、天气 | analysis PK(schedule_id) |
+| 衍生数据保留 | recent/h2h/standings/lineup 原始快照 | JSONB 整存 |
+
+### 1.7 跨源对齐
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 竞彩场次 ↔ 球探编号 | 竞彩开设比赛在 titan 的 schedule_id（用于取详情/亚盘/欧赔/大小球） | `unified_matches.source_refs`（聚合层） |
+| 隐含概率对比 | 球探亚盘/欧赔隐含概率 ↔ 竞彩停售投票（核心研究点） | 聚合层归一化（源库存原始，归一化在聚合层） |
+| 竞彩终赔展示 | 赛事中心列表的竞彩胜平负/让球胜平负终赔 | 竞彩源库（titan 不冗余，见 1.1.1） |
+
+### 1.8 已确认的业务取舍
+
+- **赛程全量、详情按需**：titan_schedules 存全量 29.8 万场（赛事中心）；analysis / 赔率仅爬竞彩开设场次 + 指定主流联赛全赛季。
+- **竞彩数据不进球探库**：竞彩终赔/投票等从竞彩源库获取，球探库不冗余，保持源库纯净。
+- **赔率按类型分 3 表**：欧赔/亚盘/大小球 changes 结构不同，各自平铺（公司用 company_id 区分，不拆表）。
+- **append-only + 幂等**：赔率只增不改，业务唯一键 + `ON CONFLICT DO NOTHING`。
+- **索引原则**：只为过滤/排序/连接列建索引（company_id / change_time / comp_season）；纯展示列不建索引；球队按主/客单列。
+- **衍生数据 JSONB**：recent/h2h/standings/lineup 整存，不拆明细表。
+- **schedule_id 主键 + 单一来源导入**：爬虫目录存在同名联赛改名（EFL Cup 双目录）致 956 场重复，导入时**指定单一来源目录** + 唯一键去重兜底（见"二、数据来源文件"）。
+
+---
+
+## 二、数据来源文件
 
 球探爬虫数据位于 `titan007_pro/data/`，共三部分：
 
 ### 1.1 `schedule/leagues|cups/{联赛}/{赛季}.json` — 赛程
 
-按 联赛目录 × 赛季 存储，一个文件含整赛季赛程（896 个文件）。顶层：
+按 联赛目录 × 赛季 存储，一个文件含整赛季赛程（实测 **1,110 个文件**：leagues 422 + cups 688）。顶层：
 
 ```json
 {
@@ -47,13 +145,15 @@
 }
 ```
 
-- `status` 语义（实测 7,533 场）：`0`=已完赛（6,602，有 full_score）、`1`=未开赛（794）、`-1`=延期（116）、`2`=进行中（21）。
+- **全量实测**：总计 **298,076 场**（leagues 120,939 + cups 177,169），赛季范围 **2015-2026**（105 个赛季串）。`total_matches` 字段与 `matches[]` 长度一致（1,110 文件 0 处不一致）。
+- `status` 语义（全量 298,076 场）：`0`=已完赛（250,146，有 full_score）、`1`=未开赛（28,692）、`-1`=延期（10,798）、`2`=进行中（4,848）、`-2~-9`/`3~9` 等少数其他状态（合计少量）。完赛占比 84%。
+- **⚠️ schedule_id 重复（956 场）**：`schedule_id` 唯一 297,120、重复 956。经查为**同名联赛目录改名**导致——`EFL_Cup_(Carabao_Cup)`（旧名，10 季）与 `EFL_Cup_Carabao_Cup`（新名，12 季）重叠赛季的同一批比赛被重复存储。处理原则：**导入时指定单一来源目录**（用新名目录），`INSERT ... ON CONFLICT DO NOTHING` 或导入前去重兜底，不改表结构。
 - `sub_league_id` 全局唯一（110 个，无冲突），指联赛内阶段（`League`/`Playoffs`/`Relegation Play-Off` 等）。
 - `competition_id` 全局唯一（98 个，无冲突）。
 
 ### 1.2 `analysis/leagues|cups/{联赛}/{赛季}/{sid}.json` — 赛前分析
 
-一场一文件（54,345 个）。顶层：
+一场一文件（实测 **55,314 个**）。顶层：
 
 ```json
 {
@@ -81,13 +181,13 @@
 
 ### 1.3 `odds/{european|asian|over_under}/leagues|cups/{联赛}/{赛季}/{sid}/{cid}.json` — 赔率
 
-一场 × 一家公司一个文件（41.5 万）。`{cid}.json` 为 full，`{cid}_half.json` 为 half。三类 changes 结构不同：
+一场 × 一家公司一个文件（实测 **459,333 个**：european 253,440 / asian 179,624 / over_under 26,269）。`{cid}.json` 为 full，`{cid}_half.json` 为 half。三类 changes 结构不同：
 
-| 类型 | 公司（company_id） | changes[].time 数量均值 | changes 字段 |
-|---|---|---|---|
-| european | 2 betfair / 90 易胜博 / 104 Interwetten / 115 威廉希尔 / 281 365 | 24.2 | `time, home_win, draw, away_win, home_win_rate, draw_rate, away_win_rate, payout_rate, kelly_home, kelly_draw, kelly_away, is_initial` |
-| asian | 1 澳门 / 8 365 / 12 易胜博 / 17 明升 | 37.0 | `time, line(盘口中文), home(主水), away(客水), status(即/早)` |
-| over_under | 1 澳门 / 8 365 / 12 易胜博 / 17 明升 | 23.6（× full/half 两表） | `time, score(多为空), line(盘口), over(大水), under(小水), status` |
+| 类型 | 文件数 | 覆盖唯一 sid | 公司（company_id） | changes[].time 数量均值 | changes 字段 |
+|---|---|---|---|---|---|
+| european | 253,440 | 51,585 | 2 betfair / 90 易胜博 / 104 Interwetten / 115 威廉希尔 / 281 365 | 24.2 | `time, home_win, draw, away_win, home_win_rate, draw_rate, away_win_rate, payout_rate, kelly_home, kelly_draw, kelly_away, is_initial` |
+| asian | 179,624 | 41,776 | 1 澳门 / 8 365 / 12 易胜博 / 17 明升 | 37.0 | `time, line(盘口中文), home(主水), away(客水), status(即/早)` |
+| over_under | 26,269 | 3,662 | 1 澳门 / 8 365 / 12 易胜博 / 17 明升 | 23.6（× full/half 两表） | `time, score(多为空), line(盘口), over(大水), under(小水), status` |
 
 - 欧赔恒 `full`，无 `_half` 文件（已核实）；亚盘当前恒 `full`（`_half`=0，为将来预留）；大小球有 `full`+`half` 两种。
 - 老版本文件（2016 年前）顶层无 `competition_id/season/match_time/source/fetched_at` 字段，需从目录路径推导，**赔率表只存 `schedule_id` 关联，不冗余联赛信息**。
@@ -98,7 +198,7 @@
 
 ---
 
-## 二、titan_competitions — 联赛维度表
+## 三、titan_competitions — 联赛维度表
 
 > 98 行。来源：`schedule/leagues|cups/{联赛}/{赛季}.json` 顶层 `competition_id / competition_name_cn / competition_name_en`，按 `leagues`/`cups` 目录推导 `is_cup`。
 
@@ -116,7 +216,7 @@ CREATE TABLE titan_competitions (
 
 ---
 
-## 三、titan_teams — 球队维度表
+## 四、titan_teams — 球队维度表
 
 > 行数由全量赛程提取（估计数千行）。来源：`schedule` 文件 `matches[].home_team_id / away_team_id` 与对应中文/英文名。
 
@@ -133,7 +233,7 @@ CREATE TABLE titan_teams (
 
 ---
 
-## 四、titan_companies — 公司维度表
+## 五、titan_companies — 公司维度表
 
 > 9 行。来源：`odds/*/{联赛}/{赛季}/{sid}/{cid}.json` 的 `company_id / company_name`。
 
@@ -164,9 +264,9 @@ CREATE TABLE titan_companies (
 
 ---
 
-## 五、titan_schedules — 赛程主表
+## 六、titan_schedules — 赛程主表
 
-> 一场一行（约 8 万行）。来源：`schedule/leagues|cups/{联赛}/{赛季}.json` 的 `matches[]`，联赛/赛季信息取文件顶层。
+> 一场一行（实测 **297,120 行**，去重后；重复来源见"二、1.1"）。来源：`schedule/leagues|cups/{联赛}/{赛季}.json` 的 `matches[]`，联赛/赛季信息取文件顶层。
 
 ```sql
 CREATE TABLE titan_schedules (
@@ -193,8 +293,15 @@ CREATE TABLE titan_schedules (
 );
 CREATE INDEX idx_titan_sched_comp_season ON titan_schedules (competition_id, season);
 CREATE INDEX idx_titan_sched_time        ON titan_schedules (match_time);
-CREATE INDEX idx_titan_sched_team        ON titan_schedules (home_team_id, away_team_id);
+CREATE INDEX idx_titan_sched_home_team   ON titan_schedules (home_team_id);
+CREATE INDEX idx_titan_sched_away_team   ON titan_schedules (away_team_id);
 ```
+
+> **索引设计说明**（原则见"〇、11"）：
+> - `idx_titan_sched_comp_season (competition_id, season)`：支撑赛事中心按联赛+赛季浏览（R1 核心）。
+> - `idx_titan_sched_time (match_time)`：支撑按比赛日/时间区间筛选。
+> - `idx_titan_sched_home_team` / `idx_titan_sched_away_team`（**单列拆分**）："某队全部比赛"需 `home_team_id = 甲 OR away_team_id = 甲` 跨主客两侧 OR 查询，复合索引 `(home_team_id, away_team_id)` 无法加速（前缀只能命中一列），故拆两个单列索引（与 Sofascore 库一致）。
+> - **不建索引**：`full_score`/`half_score`/`status`/`group_name`/`round_name`/`competition_name_*`/`home_team`/`away_team` 等纯展示列。
 
 **字段来源与转化**：
 
@@ -217,11 +324,11 @@ CREATE INDEX idx_titan_sched_team        ON titan_schedules (home_team_id, away_
 
 ---
 
-## 六、titan_euro_odds — 欧赔快照表
+## 七、titan_euro_odds — 欧赔快照表
 
 > 一行 = 一场 × 一家公司 × 一个时间点的一次赔率变动。来源：`odds/european/.../{sid}/{cid}.json` 的 `changes[]`。欧赔恒 `full`，**无 subtype 列**（已确认不存在半场赔率）。
 > **append-only**：只插入新变动，不 UPDATE/DELETE 旧行；幂等靠业务唯一键。
-> 行数估算：8 万场 × 5 家 × avg 24.2 ≈ 970 万行。
+> 行数估算：253,440 文件 × avg 24.2 ≈ 613 万行。
 
 ```sql
 CREATE TABLE titan_euro_odds (
@@ -270,12 +377,12 @@ CREATE INDEX idx_titan_euro_odds_time  ON titan_euro_odds (change_time);
 
 ---
 
-## 七、titan_asian_odds — 亚盘快照表
+## 八、titan_asian_odds — 亚盘快照表
 
 > 一行 = 一场 × 一家公司 × 一个时间点的一次盘口变动。来源：`odds/asian/.../{sid}/{cid}.json`。4 家公司。
 > 当前恒 `full`（实测 `_half` 文件 = 0），但**按需求预置 subtype 列**，为将来 half 预留。
 > **append-only**：只插入新变动，不 UPDATE/DELETE 旧行；幂等靠业务唯一键。
-> 行数估算：8 万场 × 4 家 × avg 37 ≈ 1,190 万行。
+> 行数估算：179,624 文件 × avg 37 ≈ 665 万行。
 
 ```sql
 CREATE TABLE titan_asian_odds (
@@ -307,19 +414,19 @@ CREATE INDEX idx_titan_asian_odds_time ON titan_asian_odds (change_time);
 | subtype | 文件 `{cid}.json` / `{cid}_half.json` | full / half | 当前恒 full |
 | change_time | `changes[].time` | 年份推断 → TIMESTAMPTZ | 同欧赔规则 |
 | line_raw | `changes[].line` | 原样 | 保真 |
-| line_value | `changes[].line` | 映射表/规则 → NUMERIC | 见"九、亚盘盘口映射" |
+| line_value | `changes[].line` | 映射表/规则 → NUMERIC | 见"十、亚盘盘口映射" |
 | home_odds / away_odds | `changes[].home / away` | → NUMERIC | 主水/客水 |
 | status | `changes[].status` | 原样 | 即盘/早盘 |
 
-**line_value 映射失败处理**：未知盘口优先按规则解析，仍失败则置 NULL 并记 warning 日志，人工补入映射 dict 后重跑该场（详见"九"）。
+**line_value 映射失败处理**：未知盘口优先按规则解析，仍失败则置 NULL 并记 warning 日志，人工补入映射 dict 后重跑该场（详见"十"）。
 
 ---
 
-## 八、titan_over_under_odds — 大小球快照表
+## 九、titan_over_under_odds — 大小球快照表
 
 > 一行 = 一场 × 一家公司 × full/half × 一个时间点的一次盘口变动。来源：`odds/over_under/.../{sid}/{cid}.json`（full）+ `{cid}_half.json`（half）。4 家公司。
 > **append-only**：只插入新变动，不 UPDATE/DELETE 旧行；幂等靠业务唯一键。
-> 行数估算：8 万场 × 4 家 × 2 × avg 23.6 ≈ 1,510 万行。
+> 行数估算：26,269 文件 × avg 23.6 ≈ 62 万行。
 
 ```sql
 CREATE TABLE titan_over_under_odds (
@@ -357,9 +464,9 @@ CREATE INDEX idx_titan_ou_odds_time ON titan_over_under_odds (change_time);
 
 ---
 
-## 九、亚盘盘口映射（line → line_value）
+## 十、亚盘盘口映射（line → line_value）
 
-### 9.1 标准盘口表（0.25 步进，-7.0 ~ +7.0）
+### 10.1 标准盘口表（0.25 步进，-7.0 ~ +7.0）
 
 全量扫描 179,624 个亚盘文件得到 63 个唯一值，全部落在 **0.25 步进网格** 上。`受让 X` 表示主队受让 → **负值**；无前缀为主队让球 → **正值**。标准 57 值：
 
@@ -395,7 +502,7 @@ CREATE INDEX idx_titan_ou_odds_time ON titan_over_under_odds (change_time);
 | 六球半/七球 | 6.75 | 受让七球 | -7 |
 | 七球 | 7 | | |
 
-### 9.2 简写变体（球探数据不规范写法，语义同标准值）
+### 10.2 简写变体（球探数据不规范写法，语义同标准值）
 
 | line_raw | line_value | 等价标准盘口 |
 |---|---|---|
@@ -406,7 +513,7 @@ CREATE INDEX idx_titan_ou_odds_time ON titan_over_under_odds (change_time);
 | 受半球 | -0.5 | 受让半球 |
 | 受半/一 | -0.75 | 受让半球/一球 |
 
-### 9.3 映射实现（migrator.py 常量 dict + 规则兜底）
+### 10.3 映射实现（migrator.py 常量 dict + 规则兜底）
 
 ```python
 # 1) 精确映射 dict：标准 57 值 + 简写 6 值，全量预置
@@ -427,9 +534,9 @@ def asian_line_to_value(line: str) -> float | None:
 
 ---
 
-## 十、titan_analysis — 赛前分析表
+## 十一、titan_analysis — 赛前分析表
 
-> 一场一行（54,345 行）。来源：`analysis/leagues|cups/{联赛}/{赛季}/{sid}.json`。
+> 一场一行（55,314 行）。来源：`analysis/leagues|cups/{联赛}/{赛季}/{sid}.json`。
 
 ```sql
 CREATE TABLE titan_analysis (
@@ -481,7 +588,7 @@ CREATE INDEX idx_titan_analysis_comp ON titan_analysis (competition_id, season);
 
 ---
 
-## 十一、不落库/不建表清单
+## 十二、不落库/不建表清单
 
 | 区块/字段 | 来源 | 不落库原因 |
 |---|---|---|
@@ -501,35 +608,39 @@ CREATE INDEX idx_titan_analysis_comp ON titan_analysis (competition_id, season);
 
 ## 十三、行数估算
 
-基于 41.5 万 odds 文件、5.4 万 analysis 文件、8 万赛程估算：
+基于实测文件数（459,333 个 odds / 55,314 个 analysis / 1,110 个 schedule）与"详情/赔率仅爬竞彩开设场次 + 指定主流联赛"口径：
 
-| 表 | 行/场 | 8 万场行数 |
+| 表 | 计算依据 | 行数（实测） |
 |---|---|---|
-| titan_schedules | 1 | 80,000 |
-| titan_analysis | 1（有分析场次） | 54,345 |
-| titan_euro_odds | 5 家 × 24.2 | ≈ 9,680,000 |
-| titan_asian_odds | 4 家 × 37.0 | ≈ 11,840,000 |
-| titan_over_under_odds | 4 家 × 2 × 23.6 | ≈ 15,104,000 |
-| titan_competitions | | 98 |
-| titan_companies | | 9 |
-| titan_teams | | 数千 |
-| **合计** | | **≈ 3,700 万行** |
+| titan_schedules | 全量赛程去重（298,076 − 956 重复） | 297,120 |
+| titan_analysis | 有分析文件数 | 55,314 |
+| titan_euro_odds | 253,440 文件 × 24.2 快照 | ≈ 6,133,000 |
+| titan_asian_odds | 179,624 文件 × 37.0 | ≈ 6,646,000 |
+| titan_over_under_odds | 26,269 文件 × 23.6 | ≈ 620,000 |
+| titan_competitions | 联赛 | 98 |
+| titan_companies | 公司 | 9 |
+| titan_teams | 全量赛程球队去重 | 数千 |
+| **合计** | | **≈ 1,410 万行** |
 
-**查询效率**：赔率表用 `id` 主键 + 业务唯一键（含 `schedule_id` 前缀），按场次过滤命中唯一键前缀索引，毫秒级；`company_id` / `change_time` 单列索引支撑跨公司对比与时间区间筛选。PG 千万级 append-only 表无压力，**第一版不做表分区**（详见"十二、增量写入与一致性设计"）。
+> **规模说明**：
+> - 赛程 29.8 万场为**全量**（赛事中心展示用）；但详情/赔率只覆盖竞彩开设场次 + 主流联赛（欧赔 51,585 场 / 亚盘 41,776 场 / 大小球 3,662 场），故赔率三表以实际文件数为准，而非"全量赛程 × 公司数"。
+> - 若未来补全竞彩全部 7 万场 + 五大联赛全量，欧赔/亚盘行数会增长（约 1.5~2 倍）；大小球覆盖基数小，增长有限。
+
+**查询效率**：赔率表用 `id` 主键 + 业务唯一键（含 `schedule_id` 前缀），按场次过滤命中唯一键前缀索引，毫秒级；`company_id` / `change_time` 单列索引支撑跨公司对比与时间区间筛选。PG 千万级 append-only 表无压力，**第一版不做表分区**（详见"十四、增量写入与一致性设计"）。
 
 ---
 
-## 十二、增量写入与一致性设计
+## 十四、增量写入与一致性设计
 
 > 球探爬虫对赔率是**高频赛前更新**：live 管道每 5 分钟 tick 一次（P0 近赛 3 分钟），每场每公司多次抓取。本节说明表设计如何支撑这种模式。
 
-### 12.1 写入模式：append-only + 幂等
+### 14.1 写入模式：append-only + 幂等
 
 赔率三表（titan_euro_odds / titan_asian_odds / titan_over_under_odds）是**只增不改的历史日志**：
 
 | 阶段 | 方式 | 说明 |
 |---|---|---|
-| 历史回填 | `COPY` 批量插入，一次事务 | 一次性导入 47 万 JSON |
+| 历史回填 | `COPY` 批量插入，一次事务 | 一次性导入 51.5 万 JSON |
 | live 增量 | `INSERT ... ON CONFLICT DO NOTHING`，批量一次事务 | 每场每公司每次抓取 |
 
 **关键**：爬虫抓到的 `changes[]` 是**全量快照**（从初盘到当前的所有变动），每次只有末尾 1~3 条是"未见过"的新变动。靠业务唯一键去重：
@@ -546,7 +657,7 @@ DO NOTHING;
 - 已存在的行自动跳过，**写入量从全量 37 行降到实际新增行数**
 - 同一 `change_time` 多条真实变动（赔率值不同）各自保留，不误合并
 
-### 12.2 为什么不做全量重写
+### 14.2 为什么不做全量重写
 
 | 对比 | 全量重写（DELETE + INSERT） | 增量 append |
 |---|---|---|
@@ -556,7 +667,7 @@ DO NOTHING;
 | 一致性 | 删旧插新有半更新窗口 | 无删除，天然无半更新 |
 | 索引 | 反复重排 | B-tree 尾部追加 O(log n) |
 
-### 12.3 一致性保证
+### 14.3 一致性保证
 
 | 问题 | 解法 |
 |---|---|
@@ -565,7 +676,7 @@ DO NOTHING;
 | live 与回填并发 | 双方都幂等 append，无互斥需求 |
 | 读一致性 | 聚合引擎连源库用只读事务（架构已定） |
 
-### 12.4 更新协议（live.py 改造）
+### 14.4 更新协议（live.py 改造）
 
 `_process_match_odds` 从「load → merge → save 整文件」改为「对新 changes 批量 INSERT」：
 
@@ -576,6 +687,6 @@ DO NOTHING;
 
 > 双写过渡期（PG + JSON 并行）：JSON 侧保留原 merge 语义，PG 侧走增量 INSERT，全量对比验证后关 JSON。
 
-### 12.5 分区说明
+### 14.5 分区说明
 
 **第一版不做表分区**。赔率查询总走 `schedule_id` 唯一键索引（看某场走势），与表大小无关；3000 万行 append-only 表 PG 完全撑得住。将来若出现"按比赛时间大范围分析"慢查询或表过亿，再 `ALTER TABLE ... PARTITION BY RANGE (change_time)` 按赛季分区，并预创建下赛季分区。

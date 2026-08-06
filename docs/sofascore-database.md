@@ -1,8 +1,8 @@
 # Sofascore 源库数据库设计（已定稿部分）
 
 > 本文档记录 **sofascore 库**已确认的数据表设计与数据来源映射，供开发、分析与后续建模参考。
-> 当前定稿范围：**Sofascore 源库全部定稿** —— matches + 4 张维度表（leagues/seasons/teams/countries）+ 3 张字典表（status_codes/cup_round_types/round_prefixes）+ details 相关表（players/match_players/match_details/match_votes/match_missing_players/match_statistics/team_season_stats）。
-> `match_incidents` **确认不建表**（详见"十七"）。
+> 当前定稿范围：**Sofascore 源库全部定稿** —— schedules + 4 张维度表（leagues/seasons/teams/countries）+ 3 张字典表（status_codes/cup_round_types/round_prefixes）+ details 相关表（players/match_players/match_details/match_votes/match_missing_players/match_statistics/team_season_stats）。
+> `match_incidents` **确认不建表**（详见"十九"）。
 > 所有表均采用**软关联（无 FOREIGN KEY）**，字段来源与转化方式见各表"字段来源与转化"小节。
 
 ---
@@ -13,7 +13,7 @@
    - 原因：批量导入时 FK 校验有开销；Sofascore 未来若新增未知编码，软关联不会阻塞数据入库（字典表缺行时 JOIN 结果为 NULL，可事后补字典）。
 2. **语义单一来源**：字段的语义（如比分 current/display/normaltime 差异、status 各编码含义、cupRoundType 含义）在本文档**以及库内字典表**中说明，人类读文档、SQL 查字典表。
 3. **尽量满足 3NF**：国家/州际信息统一收敛到 countries 表，不在 leagues/teams 重复冗余国家多列。
-4. **明细表冗余赛事维度**：以 match_id 软关联 matches 的明细表（match_players/match_votes/match_missing_players/match_statistics 等），统一冗余 `league_id`/`season_id` 两列作**查询入口**。原因：按赛事/赛季过滤是分析高频，冗余后免 JOIN matches 即可直接走 `(league_id, season_id, match_id)` 复合索引；扩充赛事不增加额外成本。冗余值复用同一 details 文件顶层的 `league.id`/`seasonId`（与 matches 表同值）。
+4. **明细表冗余赛事维度**：以 match_id 软关联 schedules 的明细表（match_players/match_votes/match_missing_players/match_statistics 等），统一冗余 `league_id`/`season_id` 两列作**查询入口**。原因：按赛事/赛季过滤是分析高频，冗余后免 JOIN schedules 即可直接走 `(league_id, season_id, match_id)` 复合索引；扩充赛事不增加额外成本。冗余值复用同一 details 文件顶层的 `league.id`/`seasonId`（与 schedules 表同值）。
 5. **自增主键**：需要自增的列用 `SERIAL`，删除行后序列值**不复用、后续值不变化**。
 6. **爬虫快照字段**（如 teams.user_count）：同一实体在不同抓取时点可能变化，后续 CRUD 用 `INSERT ... ON CONFLICT ... DO UPDATE` upsert 刷新。
 7. **比分语义**（重要）：Sofascore 比分对象有 4 个语义不同的字段，不能混用：
@@ -25,7 +25,64 @@
 
 ---
 
-## 一、数据来源文件
+## 一、业务需求与设计依据
+
+> 本章汇总 Sofascore 库各表**支撑的业务需求**（页面功能 / 分析场景），作为建表、建索引、冗余字段的依据。每个需求标注支撑的表与关键索引，保证"需求 → 结构"可追溯。
+
+### 1.1 赛程浏览与导航（schedules）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 构建各轮次赛程 | 按联赛+赛季过滤、按轮次分组展示赛程（联赛按 round 分组、杯赛按阶段） | `idx_schedules_league_season_round (league_id, season_id, round_num)` |
+| 赛程项 → 详情页跳转 | 赛程列表每行"详情"按钮跳转对应比赛详情页 | schedules.match_id 主键 + match_details/match_players 等软关联 |
+| 跨源找比赛 | 用其他源（竞彩/球探）的比赛 ID、日期、主客队找到对应 Sofascore 比赛 | `match_id` 主键；`(league_id, season_id)` 前缀；`idx_schedules_kickoff` |
+| 近期赛程 / 按日期查 | 今日/某日比赛列表、未来几天赛程 | `idx_schedules_kickoff (kickoff_time)` |
+| 某队全部比赛 | 主客两侧都要查（"主队=甲 OR 客队=甲"），复合索引无法加速 OR 查询 | `idx_schedules_home_team` / `idx_schedules_away_team` 单列索引 |
+
+### 1.2 比赛详情页（match_details + match_players + match_statistics）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 按 match_id 查详情 | 裁判/球场/上座/阵容确认/双方阵型/赛前排位等基本信息 | match_details PK(match_id) |
+| 按比赛查球队技术统计 | 双方射门/控球/角球/黄牌等对比（ALL/1ST/2ND 各期） | match_statistics PK(match_id, is_home, period) |
+| 阵容展示 | 详情页显示双方首发/替补名单、阵型、球衣号码 | match_players PK(match_id, player_id) |
+| 球队赛季聚合对比 | 展示球队本赛季整体表现（进球/控球/评分等） | team_season_stats PK(team_id, season_id) |
+
+### 1.3 球员维度（players + match_players）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 球员详情页 | 点阵容球员跳转球员页，展示位置、参赛历史 | players（position 主流位置快照） |
+| 球员比赛历史 | 按时间倒序列出参赛记录、比分、评分 | match_players JOIN schedules，按 player_id 过滤 |
+| 按赛季筛选参赛 | 某球员某赛季的出场列表、出场次数 | `idx_match_players_player_season (player_id, season_id)` |
+| 时间范围参赛 | 某时间窗内出场（如近 10 场、本赛季） | 上索引 JOIN schedules.kickoff_time |
+| 评分统计 | 平均评分、按位置聚合的评分/出场统计 | match_players.rating（现算，见"十三"） |
+
+### 1.4 球迷投票（match_votes）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 按 match_id 查投票 | 详情页展示胜平负/两队进球/先进球投票 | match_votes 按 match_id 过滤 |
+| 投票变化轨迹 | 竞彩服务核心：**每日 22/23 点投票 vs 开赛时点投票**对比，反映临场资金/情绪变化 | UNIQUE(match_id, snapshot_at) 时间序列；历史基线 snapshot_at=开赛时间，未来定时 append |
+| 无票场次不占行 | votes 缺失的场次不插行 | 入库约定 |
+
+### 1.5 伤停名单（match_missing_players）
+
+| 需求 | 说明 | 支撑结构 |
+|---|---|---|
+| 按比赛查伤停 | 详情页展示双方缺阵球员及伤情/预计复出 | match_missing_players 按 match_id 过滤 |
+| 按球员查伤病历史 | 球员详情页展示其历史伤病记录、缺阵场次 | `idx_match_missing_player (player_id)` |
+| 球员历史中显示伤停状态 | 球员参赛历史里标注某场是否伤停 | 上索引 JOIN match_players |
+
+### 1.6 已确认的业务取舍
+
+- **跨源映射**：三个源通过各自比赛 ID 映射，所有与比赛相关的表**必须有 match_id**（已落实：schedules/match_players/match_details/match_votes/match_missing_players/match_statistics 均含）。
+- **match_incidents 不建表**（详见"十九"）：事件级分析价值与投入不成比例，进球/红牌从比分与统计推断。
+- **players.position 保留**：球员页必须展示位置（详见"十一"说明）。
+
+---
+
+## 二、数据来源文件
 
 Sofascore 爬虫赛程数据位于 `data/schedules_v3/{联赛}/{赛季}.json`，共 309 个文件、82,288 场比赛。每文件结构：
 
@@ -75,11 +132,11 @@ Sofascore 爬虫赛程数据位于 `data/schedules_v3/{联赛}/{赛季}.json`，
 }
 ```
 
-> ⚠️ 详情与赛程三处差异：`status` 是字符串（赛程是对象 code/type/description）、`homeScore/awayScore` 是标量 int（赛程是 current/display/... 对象）、`league` 仅 id/name/shortName。因此**比分/状态以 schedules_v3 为准**（已存 matches 表），详情表不重复存储。
+> ⚠️ 详情与赛程三处差异：`status` 是字符串（赛程是对象 code/type/description）、`homeScore/awayScore` 是标量 int（赛程是 current/display/... 对象）、`league` 仅 id/name/shortName。因此**比分/状态以 schedules_v3 为准**（已存 schedules 表），详情表不重复存储。
 
 ---
 
-## 二、countries — 国家/洲际区域表
+## 三、countries — 国家/洲际区域表
 
 ```sql
 CREATE TABLE countries (
@@ -116,7 +173,7 @@ CREATE TABLE countries (
 
 ---
 
-## 三、leagues — 联赛表（29 行）
+## 四、leagues — 联赛表（29 行）
 
 ```sql
 CREATE TABLE leagues (
@@ -146,7 +203,7 @@ CREATE TABLE leagues (
 
 ---
 
-## 四、seasons — 赛季表（309 行）
+## 五、seasons — 赛季表（309 行）
 
 ```sql
 CREATE TABLE seasons (
@@ -171,7 +228,7 @@ CREATE TABLE seasons (
 
 ---
 
-## 五、teams — 球队表（2,159 行）
+## 六、teams — 球队表（2,159 行）
 
 ```sql
 CREATE TABLE teams (
@@ -214,10 +271,10 @@ CREATE TABLE teams (
 
 ---
 
-## 六、matches — 赛程主表（82,288 行）
+## 七、schedules — 赛程主表（82,288 行）
 
 ```sql
-CREATE TABLE matches (
+CREATE TABLE schedules (
     match_id      INTEGER PRIMARY KEY,  -- match.id
     league_id     INTEGER NOT NULL,     -- 顶层 league.id（match.tournament 无 id）
     season_id     INTEGER NOT NULL,     -- 软关联 seasons.season_id
@@ -252,13 +309,18 @@ CREATE TABLE matches (
     -- ==== 时间 ====
     kickoff_time    TIMESTAMPTZ NOT NULL,  -- startTimestamp
     scraped_at      TIMESTAMPTZ DEFAULT now(),
-    updated_at      TIMESTAMPTZ DEFAULT now(),
-    UNIQUE (league_id, season_id, match_id)
+    updated_at      TIMESTAMPTZ DEFAULT now()
 );
-CREATE INDEX idx_matches_kickoff        ON matches (kickoff_time);
-CREATE INDEX idx_matches_league_season  ON matches (league_id, season_id);
-CREATE INDEX idx_matches_team           ON matches (home_team_id, away_team_id);
+CREATE INDEX idx_schedules_league_season_round ON schedules (league_id, season_id, round_num);
+CREATE INDEX idx_schedules_kickoff           ON schedules (kickoff_time);
+CREATE INDEX idx_schedules_home_team         ON schedules (home_team_id);
+CREATE INDEX idx_schedules_away_team         ON schedules (away_team_id);
 ```
+
+> **索引设计说明**：
+> - `match_id` 已是 PRIMARY KEY（全局唯一），不再建 `UNIQUE (league_id, season_id, match_id)` —— 该约束与主键重复，是冗余（白占索引、拖慢插入）。按"联赛+赛季"过滤的查询由新复合索引 `(league_id, season_id, round_num)` 的前两列前缀承接，同时第三列 `round_num` 支撑"构建某联赛某赛季各轮次赛程"的排序。
+> - 主客队查询（"某队全部比赛"）拆成两个**单列**索引 `idx_schedules_home_team` / `idx_schedules_away_team`：复合索引 `(home_team_id, away_team_id)` 只能加速"主队=甲 AND 客队=乙"，无法加速"主队=甲 **OR** 客队=甲"，故不建复合而拆单列，各走各的索引。
+> - `idx_schedules_kickoff` 支撑按开赛时间查询（近期赛程、跨源按日期找比赛）。
 
 **JSON 来源与转化**（match 对象）：
 | 列 | JSON | 转化方式 | 备注 |
@@ -280,11 +342,11 @@ CREATE INDEX idx_matches_team           ON matches (home_team_id, away_team_id);
 - **不存** `finalResultOnly`：该字段 true 的 10 场全部是 code 60/70（postponed/canceled），可由 status_code 推断，不冗余存储。
 - **不存** `date` 字符串（与 startTimestamp 冗余）；**不存** `match.tournament.*`（无 id，仅展示信息，league 信息在维度表）。
 
-**入库简述**：按 `match_id` upsert；若 JSON 中出现字典表未收录的 status_code / cup_round_type / round_prefix，先向对应字典表插入占位行（中文含义标 `待翻译`），再写 matches，保证数据入库不阻塞。
+**入库简述**：按 `match_id` upsert；若 JSON 中出现字典表未收录的 status_code / cup_round_type / round_prefix，先向对应字典表插入占位行（中文含义标 `待翻译`），再写 schedules，保证数据入库不阻塞。
 
 ---
 
-## 七、status_codes — 状态码字典表（9 行）
+## 八、status_codes — 状态码字典表（9 行）
 
 ```sql
 CREATE TABLE status_codes (
@@ -310,8 +372,8 @@ CREATE TABLE status_codes (
 | 92 | finished | Retired | 弃赛 | false | 1 |
 
 **说明**：
-- `description` 与 `code` 严格 1:1，因此 matches 表只存 code+type，description 查此表。
-- `final_result_only=true` 等价于"延期/取消/中止场次"，matches 表不冗余该列，需要时 JOIN 此表。
+- `description` 与 `code` 严格 1:1，因此 schedules 表只存 code+type，description 查此表。
+- `final_result_only=true` 等价于"延期/取消/中止场次"，schedules 表不冗余该列，需要时 JOIN 此表。
 
 **字段来源与转化**：
 
@@ -323,11 +385,11 @@ CREATE TABLE status_codes (
 | meaning_cn | 人工翻译 | 中文含义 | 完场/加时完场/点球完场... |
 | final_result_only | 人工标注 | 布尔 | code 60/70/90 为 true |
 
-**入库简述**：入库时对每个未收录的 status_code 先插占位行（meaning_cn 标"待翻译"），再写 matches，保证不阻塞。
+**入库简述**：入库时对每个未收录的 status_code 先插占位行（meaning_cn 标"待翻译"），再写 schedules，保证不阻塞。
 
 ---
 
-## 八、cup_round_types — 杯赛轮次字典表（5 行）
+## 九、cup_round_types — 杯赛轮次字典表（5 行）
 
 ```sql
 CREATE TABLE cup_round_types (
@@ -347,7 +409,7 @@ CREATE TABLE cup_round_types (
 | 2 | 2 | Semifinals | 半决赛 | 半决赛 | 496 |
 | 1 | 1 | Final | 决赛 | 决赛 | 294 |
 
-**说明**：`cupRoundType` 是 Sofascore 的 2 的幂编码，值 = 该轮比赛场次数，可推导轮次名；`round_name`（原文）更可靠，两者都在 matches 表保留。
+**说明**：`cupRoundType` 是 Sofascore 的 2 的幂编码，值 = 该轮比赛场次数，可推导轮次名；`round_name`（原文）更可靠，两者都在 schedules 表保留。
 
 **字段来源与转化**：
 
@@ -358,11 +420,11 @@ CREATE TABLE cup_round_types (
 | round_name_en | 人工翻译（或 Sofascore 页面轮次名） | 英文 | Round of 32 等 |
 | round_name_cn | 人工翻译 | 中文 | 32强/16强/八强/半决赛/决赛 |
 
-**入库简述**：对未收录的 cupRoundType 插占位行（中文标"待翻译"），再写 matches。
+**入库简述**：对未收录的 cupRoundType 插占位行（中文标"待翻译"），再写 schedules。
 
 ---
 
-## 九、round_prefixes — 阶段标签字典表（4 行）
+## 十、round_prefixes — 阶段标签字典表（4 行）
 
 ```sql
 CREATE TABLE round_prefixes (
@@ -388,11 +450,11 @@ CREATE TABLE round_prefixes (
 | value | `match.roundInfo.prefix`（全量扫描去重） | 原样 | Qualification/Preliminary/Europa Playoffs/Relegation-Promotion |
 | meaning_cn | 人工翻译 | 中文含义 | 资格赛/预选赛/欧联附加赛/升降级附加赛 |
 
-**入库简述**：对未收录的 prefix 插占位行（中文标"待翻译"），再写 matches。
+**入库简述**：对未收录的 prefix 插占位行（中文标"待翻译"），再写 schedules。
 
 ---
 
-## 十、players — 球员维度表（薄表）
+## 十一、players — 球员维度表（薄表）
 
 ```sql
 CREATE TABLE players (
@@ -412,22 +474,24 @@ CREATE TABLE players (
 | player_id | `lineups.home/away.players[].player.id` | 原样 | 软关联 match_players.player_id |
 | name | `lineups.home/away.players[].player.name` | 原样 | 跨场一致，可直接聚合维护 |
 | position | 各场 `lineups...players[].position` 聚合 | 取众数（COUNT 最大短码） | 仅 G/D/M/F 四码；Sofascore 细粒度位置（前腰/后腰等）当前数据不可得，留待未来扩展 |
-| first_seen_at / last_seen_at | 该球员所有比赛的 `startTimestamp` | MIN/MAX(kickoff_time) | 从 match_players JOIN matches 聚合 |
+| first_seen_at / last_seen_at | 该球员所有比赛的 `startTimestamp` | MIN/MAX(kickoff_time) | 从 match_players JOIN schedules 聚合 |
 
 **入库简述**：扫描全部 details 文件的 lineups，按 `player_id` upsert；name 取最新、position 取众数、first/last_seen 用聚合结果刷新。
 
-**说明**：薄表定位，仅存球员稳定身份。下列"现算字段"**不落库**，见"十二、现算字段与查询口径"。
+**说明**：
+- **position 必须落库（不删）**：球员列表页/详情页要展示位置，故 `position` 列保留，语义为"**当前主流位置快照**"——该球员全部出场中的众数短码（COUNT 最大的 G/D/M/F），upsert 时随数据刷新。已核实 251/714（35%）球员跨场位置变化，聚合值正是"踢得最多的位置"，作展示字段够用。
+- 薄表定位，仅存球员稳定身份 + 位置快照。下列"现算字段"**不落库**，见"十三、现算字段与查询口径"。
 
 ---
 
-## 十一、match_players — 比赛阵容表
+## 十二、match_players — 比赛阵容表
 
 ```sql
 CREATE TABLE match_players (
-    match_id       BIGINT NOT NULL,      -- 软关联 matches.match_id（details.matchId）
+    match_id       INTEGER NOT NULL,      -- 软关联 schedules.match_id（details.matchId）
     player_id      INTEGER NOT NULL,     -- 软关联 players.player_id
-    league_id      BIGINT,               -- 查询入口：与 matches.league_id 同值（复用 details.league.id）
-    season_id      BIGINT,               -- 查询入口：与 matches.season_id 同值（复用 details 顶层 seasonId）
+    league_id      INTEGER,               -- 查询入口：与 schedules.league_id 同值（复用 details.league.id）
+    season_id      INTEGER,               -- 查询入口：与 schedules.season_id 同值（复用 details 顶层 seasonId）
     is_home        BOOLEAN NOT NULL,     -- 主队球员?（home/away 侧）
     shirt_number   INTEGER,              -- shirtNumber
     position       TEXT,                 -- 本场实际位置（G/D/M/F 短码）
@@ -441,15 +505,16 @@ CREATE TABLE match_players (
     saves          INTEGER,              -- statistics.saves（仅门将有值）
     PRIMARY KEY (match_id, player_id)
 );
-CREATE INDEX idx_match_players_ls ON match_players (league_id, season_id, match_id);
+CREATE INDEX idx_match_players_ls          ON match_players (league_id, season_id, match_id);
+CREATE INDEX idx_match_players_player_season ON match_players (player_id, season_id);
 ```
 
 **字段来源与转化**：
 
 | 列 | JSON 来源 | 类型转换/口径 | 备注 |
 |---|---|---|---|
-| match_id | 文件顶层 `matchId` | 原样 | 与 matches.match_id 同值 |
-| league_id / season_id | 复用同一 details 文件顶层的 `league.id` / `seasonId` | 原样 | 与 matches.league_id/season_id 同值，查询入口（见"〇、4"） |
+| match_id | 文件顶层 `matchId` | 原样 | 与 schedules.match_id 同值 |
+| league_id / season_id | 复用同一 details 文件顶层的 `league.id` / `seasonId` | 原样 | 与 schedules.league_id/season_id 同值，查询入口（见"〇、4"） |
 | player_id / is_home | `lineups.home/away.players[].player.id` | 原样；home 侧 true / away 侧 false | 从 home/away 两个数组各取 |
 | shirt_number | `...players[].shirtNumber` | INT | 无则 NULL |
 | position | `...players[].position` | 原样 | 短码 G/D/M/F 为主；旧数据罕见详细名（如 goalkeeper）原样保留 |
@@ -466,7 +531,7 @@ CREATE INDEX idx_match_players_ls ON match_players (league_id, season_id, match_
 
 ---
 
-## 十二、现算字段与查询口径（不落库）
+## 十三、现算字段与查询口径（不落库）
 
 以下需求字段**不建列**，由 SQL 现算。文档记录口径，保证实现一致。
 
@@ -474,7 +539,7 @@ CREATE INDEX idx_match_players_ls ON match_players (league_id, season_id, match_
 ```sql
 SELECT m.away_team_id AS team_id        -- 该球员踢的是客队
 FROM match_players mp
-JOIN matches m ON m.match_id = mp.match_id
+JOIN schedules m ON m.match_id = mp.match_id
 WHERE mp.player_id = :X AND mp.is_home = FALSE
   AND m.kickoff_time <= :截止时间
 ORDER BY m.kickoff_time DESC LIMIT 1;
@@ -482,14 +547,14 @@ ORDER BY m.kickoff_time DESC LIMIT 1;
 （is_home=TRUE 时取 `home_team_id`。）即"该球员最近一场比赛所在队"。
 
 **2. 球员参赛列表 / 赛季筛选**
-`match_players JOIN matches JOIN leagues/seasons`，`WHERE player_id=X`，`ORDER BY kickoff_time DESC`；按赛季看加 `AND matches.season_id=..`。
+`match_players JOIN schedules JOIN leagues/seasons`，`WHERE player_id=X`，`ORDER BY kickoff_time DESC`；按赛季看加 `AND schedules.season_id=..`。
 
 **3. 球员位置总览（top N，按出场次数或平均评分）**
 ```sql
 SELECT position, COUNT(*) AS games, AVG(rating) AS avg_rating
 FROM match_players
 WHERE player_id = :X
-  [AND match_id IN (SELECT match_id FROM matches WHERE season_id = :S)]  -- 可选按赛季
+  [AND match_id IN (SELECT match_id FROM schedules WHERE season_id = :S)]  -- 可选按赛季
 GROUP BY position
 ORDER BY :排序列 DESC;
 ```
@@ -498,11 +563,11 @@ ORDER BY :排序列 DESC;
 
 ---
 
-## 十三、match_details — 比赛详情表
+## 十四、match_details — 比赛详情表
 
 ```sql
 CREATE TABLE match_details (
-    match_id           BIGINT PRIMARY KEY,   -- 软关联 matches.match_id
+    match_id           INTEGER PRIMARY KEY,   -- 软关联 schedules.match_id
     league_id          INTEGER NOT NULL,     -- details.league.id（软关联 leagues，查询入口）
     season_id          INTEGER NOT NULL,     -- details.seasonId（软关联 seasons，查询入口）
     referee            TEXT,                 -- referee（裁判名）
@@ -528,8 +593,8 @@ CREATE INDEX idx_match_details_ls ON match_details (league_id, season_id);
 
 | 列 | JSON 来源 | 类型转换/口径 | 备注 |
 |---|---|---|---|
-| match_id | 文件顶层 `matchId` | 原样 | 与 matches.match_id 同值 |
-| league_id | `league.id` | 原样 | 软关联 leagues（查询入口，免 JOIN matches 即可按联赛筛详情） |
+| match_id | 文件顶层 `matchId` | 原样 | 与 schedules.match_id 同值 |
+| league_id | `league.id` | 原样 | 软关联 leagues（查询入口，免 JOIN schedules 即可按联赛筛详情） |
 | season_id | 文件顶层 `seasonId` | 原样 | 软关联 seasons（同上，按赛季筛） |
 | referee | `referee` | TEXT | 约 85% 场次有 |
 | venue | `venue` | TEXT | 约 88% 场次有 |
@@ -539,21 +604,21 @@ CREATE INDEX idx_match_details_ls ON match_details (league_id, season_id);
 | pregame_* | `pregameForm.homeTeam/awayTeam.*` | avgRating 数字、"value"积分、form 数组 | 仅约 55% 场次有（新数据），无则 NULL |
 
 **说明**：
-- **不存** score / status：比分与状态在 schedules_v3 可得、已存 matches 表（且详情里 status 是字符串、比分是标量 int，语义不如 schedules 对象完整），避免冗余。
-- league_id / season_id 为**查询入口冗余**：高频"按联赛+赛季筛详情"直接走复合索引，不 JOIN matches；需比分/主客队时再 `JOIN matches ON match_id`。
+- **不存** score / status：比分与状态在 schedules_v3 可得、已存 schedules 表（且详情里 status 是字符串、比分是标量 int，语义不如 schedules 对象完整），避免冗余。
+- league_id / season_id 为**查询入口冗余**：高频"按联赛+赛季筛详情"直接走复合索引，不 JOIN schedules；需比分/主客队时再 `JOIN schedules ON match_id`。
 - pregameForm 一场一值、赛中不变，拆列入库不建独立表。
 
 ---
 
-## 十四、match_votes — 球迷投票时间序列表
+## 十五、match_votes — 球迷投票时间序列表
 
 ```sql
 CREATE TABLE match_votes (
     id             BIGSERIAL PRIMARY KEY,
-    match_id       BIGINT NOT NULL,        -- 软关联 matches.match_id
-    league_id      BIGINT,                 -- 查询入口：与 matches.league_id 同值（复用 details.league.id）
-    season_id      BIGINT,                 -- 查询入口：与 matches.season_id 同值（复用 details 顶层 seasonId）
-    snapshot_at    TIMESTAMPTZ NOT NULL,   -- 抓取时间点
+    match_id       INTEGER NOT NULL,        -- 软关联 schedules.match_id
+    league_id      INTEGER,                 -- 查询入口：与 schedules.league_id 同值（复用 details.league.id）
+    season_id      INTEGER,                 -- 查询入口：与 schedules.season_id 同值（复用 details 顶层 seasonId）
+    snapshot_at    TIMESTAMPTZ NOT NULL,   -- 抓取时间点（历史回填=开赛时间，未来抓取=抓取端时间戳）
     vote_home      INTEGER,                -- votes.vote.vote1
     vote_draw      INTEGER,                -- votes.vote.vote2
     vote_away      INTEGER,                -- votes.vote.voteX
@@ -572,28 +637,28 @@ CREATE INDEX idx_match_votes_ls ON match_votes (league_id, season_id, match_id);
 | 列 | JSON 来源 | 类型转换/口径 | 备注 |
 |---|---|---|---|
 | match_id | 文件顶层 `matchId` | 原样 | |
-| league_id / season_id | 复用同一 details 文件顶层的 `league.id` / `seasonId` | 原样 | 与 matches.league_id/season_id 同值，查询入口（见"〇、4"） |
-| snapshot_at | 本次抓取时间（导入时取 `now()`） | TIMESTAMPTZ | 历史终局数据=爬取时点；未来定时任务持续插行 |
+| league_id / season_id | 复用同一 details 文件顶层的 `league.id` / `seasonId` | 原样 | 与 schedules.league_id/season_id 同值，查询入口（见"〇、4"） |
+| snapshot_at | 历史回填=该场 `startTimestamp`（开赛时间）；未来定时抓取=抓取端时间戳 | TIMESTAMPTZ | 见"设计要点" |
 | vote_home / vote_draw / vote_away | `votes.vote.vote1/vote2/voteX` | INT | 球迷投票（胜/平/负） |
 | both_yes / both_no | `votes.bothTeamsToScoreVote.voteYes/voteNo` | INT | 两队都进球？ |
 | first_home / first_nogoal / first_away | `votes.firstTeamToScoreVote.voteHome/voteNoGoal/voteAway` | INT | 先进球：主队/无进球/客队 |
 
 **设计要点**：
 - **时间序列设计**：一场比赛多行，每行是一次抓取快照，`UNIQUE(match_id, snapshot_at)` 防重。
-- **历史数据**：从现有 details 每场比赛插 1 行（snapshot_at=爬取时间），作为"终局快照"。
-- **未来竞彩**：开赛后定时任务按周期抓 votes 持续 append，形成从停投前到终场的变化轨迹——满足"看某个时间点的 votes"需求。
+- **历史回填（每场 1 行基线）**：从现有 details 每场比赛插 1 行，`snapshot_at = 开赛时间（kickoff_time）`，作为"终局快照"——代表该场开赛时点的球迷投票，是历史数据的基线锚点。
+- **未来定时抓取（append）**：**独立 votes 接口**单独抓投票（不重爬 details——页面多数数据开赛后不再变化，为抓 votes 重爬 details 性价比太低），开赛前按周期（每天 22/23 点 + 开赛前）抓取并 append，`snapshot_at = 抓取端时间戳`。多次快照形成投票变化轨迹，支撑竞彩服务的核心对比——**"每天 22/23 点的投票" vs "开赛时点投票"**（两者差异反映临场资金/情绪变化）。
 - votes 缺失率极低（3/800），无 votes 的场次不插行。
 
 ---
 
-## 十五、match_missing_players — 伤停球员表
+## 十六、match_missing_players — 伤停球员表
 
 ```sql
 CREATE TABLE match_missing_players (
     id                BIGSERIAL PRIMARY KEY,
-    match_id          BIGINT NOT NULL,      -- 软关联 matches.match_id
-    league_id         BIGINT,               -- 查询入口：与 matches.league_id 同值（复用 details.league.id）
-    season_id         BIGINT,               -- 查询入口：与 matches.season_id 同值（复用 details 顶层 seasonId）
+    match_id          INTEGER NOT NULL,      -- 软关联 schedules.match_id
+    league_id         INTEGER,               -- 查询入口：与 schedules.league_id 同值（复用 details.league.id）
+    season_id         INTEGER,               -- 查询入口：与 schedules.season_id 同值（复用 details 顶层 seasonId）
     is_home           BOOLEAN NOT NULL,     -- 主队缺阵?（lineups.home/away 下）
     player_id         INTEGER,              -- missingPlayers[].player.id
     player_name       TEXT NOT NULL,        -- missingPlayers[].player.name
@@ -601,7 +666,8 @@ CREATE TABLE match_missing_players (
     description       TEXT,                 -- "ACL Knee Injury" 等
     expected_end_date TIMESTAMPTZ           -- "2025-12-05T00:00:00+00:00"
 );
-CREATE INDEX idx_match_missing_ls ON match_missing_players (league_id, season_id, match_id);
+CREATE INDEX idx_match_missing_ls     ON match_missing_players (league_id, season_id, match_id);
+CREATE INDEX idx_match_missing_player ON match_missing_players (player_id);
 ```
 
 **字段来源与转化**：
@@ -609,7 +675,7 @@ CREATE INDEX idx_match_missing_ls ON match_missing_players (league_id, season_id
 | 列 | JSON 来源 | 类型转换/口径 | 备注 |
 |---|---|---|---|
 | match_id | 文件顶层 `matchId` | 原样 | |
-| league_id / season_id | 复用同一 details 文件顶层的 `league.id` / `seasonId` | 原样 | 与 matches.league_id/season_id 同值，查询入口（见"〇、4"） |
+| league_id / season_id | 复用同一 details 文件顶层的 `league.id` / `seasonId` | 原样 | 与 schedules.league_id/season_id 同值，查询入口（见"〇、4"） |
 | is_home | 位于 `lineups.home` 还是 `lineups.away` | home=true / away=false | |
 | player_id / player_name | `missingPlayers[].player.id/name` | 原样 | |
 | missing_type | `missingPlayers[].type` | 原样 | 目前均为 "missing" |
@@ -620,13 +686,13 @@ CREATE INDEX idx_match_missing_ls ON match_missing_players (league_id, season_id
 
 ---
 
-## 十六、match_statistics — 球队比赛统计表
+## 十七、match_statistics — 球队比赛统计表
 
 ```sql
 CREATE TABLE match_statistics (
-    match_id   BIGINT NOT NULL,           -- 软关联 matches.match_id
-    league_id  BIGINT,                    -- 查询入口：与 matches.league_id 同值（复用 details.league.id）
-    season_id  BIGINT,                    -- 查询入口：与 matches.season_id 同值（复用 details 顶层 seasonId）
+    match_id   INTEGER NOT NULL,           -- 软关联 schedules.match_id
+    league_id  INTEGER,                    -- 查询入口：与 schedules.league_id 同值（复用 details.league.id）
+    season_id  INTEGER,                    -- 查询入口：与 schedules.season_id 同值（复用 details 顶层 seasonId）
     is_home    BOOLEAN NOT NULL,          -- TRUE=主队 / FALSE=客队
     period     TEXT NOT NULL,             -- ALL / 1ST / 2ND（ET1/ET2 加时舍弃，竞彩 90 分钟结算）
     -- ============ 51 指标 value 列（statisticsItems.homeValue/awayValue 按 is_home 取对应侧）============
@@ -700,8 +766,8 @@ CREATE INDEX idx_match_statistics_ls ON match_statistics (league_id, season_id, 
 
 | 列 | JSON 来源 | 类型转换/口径 | 备注 |
 |---|---|---|---|
-| match_id | 文件顶层 `matchId` | 原样 | 与 matches.match_id 同值 |
-| league_id / season_id | 复用同一 details 文件顶层的 `league.id` / `seasonId` | 原样 | 与 matches.league_id/season_id 同值，查询入口（见"〇、4"） |
+| match_id | 文件顶层 `matchId` | 原样 | 与 schedules.match_id 同值 |
+| league_id / season_id | 复用同一 details 文件顶层的 `league.id` / `seasonId` | 原样 | 与 schedules.league_id/season_id 同值，查询入口（见"〇、4"） |
 | is_home | statisticsItems 属于主队还是客队 | home=true / away=false | |
 | period | `statistics[].period` | 原样 | ALL/1ST/2ND；ET1/ET2 舍弃 |
 | 各 value 列 | `statistics[].groups[].statisticsItems[].homeValue/awayValue` | 按 is_home 取对应侧值 | 无该项则该列 NULL |
@@ -723,7 +789,7 @@ CREATE INDEX idx_match_statistics_ls ON match_statistics (league_id, season_id, 
 
 ---
 
-## 十七、team_season_stats — 球队赛季统计表
+## 十八、team_season_stats — 球队赛季统计表
 
 数据源：`data/details/{联赛}/{赛季}/teams/{teamId}.json` 的 `statistics` 对象（每队每赛季一个文件，全量 5,831 个）。`statistics` 为**扁平标量结构**：`{ 指标名: 数值 }`，共 **117 个键**（113 统计指标 + 4 元数据 id/matches/awardedMatches/statisticsType）。宽表 1:1 转列。
 
@@ -886,16 +952,16 @@ CREATE INDEX idx_team_season_stats_ls ON team_season_stats (league_id, season_id
 
 ---
 
-## 十八、已确认但暂不落库的语义（写入文档即可）
+## 十九、已确认但暂不落库的语义（写入文档即可）
 
 - **比分字段语义**（current/display/normaltime/period1/period2 差异）：见"〇、6"，页面默认展示 normaltime，120 分钟/点球比分附注小字。不建表。
 - **status / cupRoundType / roundPrefix**：语义建表（七/八/九），同时本文档即为人类可读对照。
-- **现算字段**（current_team_id / 参赛列表 / 位置总览 / 进球牌）：见"十二、现算字段与查询口径"，不建列、由 SQL 现算。
+- **现算字段**（current_team_id / 参赛列表 / 位置总览 / 进球牌）：见"十三、现算字段与查询口径"，不建列、由 SQL 现算。
 - **match_incidents 不建表**：比赛事件（进球/黄红牌/换人/阶段/VAR/点球）已确认不落库。理由：源站 substitution 事件无球员信息、penaltyShootout 无 time、无 id 事件多，分析价值与投入不成比例；进球/红牌等可从比分与统计推断。**如未来需要事件级分析再单独设计。**
 
 ---
 
-## 十九、待讨论（后续补充）
+## 二十、待讨论（后续补充）
 
 - Sofascore 源库 15 张表已全部定稿，无待讨论项。
-- 数据文件：赛程在 `schedules_v3`（本设计的数据源）；详情在 `data/details/`（结构已核实，见表十三/十四/十五/十六/十七）。
+- 数据文件：赛程在 `schedules_v3`（本设计的数据源）；详情在 `data/details/`（结构已核实，见表十四/十五/十六/十七/十八）。
