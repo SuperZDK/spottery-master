@@ -151,6 +151,11 @@ def parse_jc_result(text: str, business_date: str) -> dict:
             if _is_match_row(fields):
                 m = _parse_match_row(fields)
                 if m:
+                    # 合并联赛中文名（competitions 段已解析，match 行引用它）
+                    sclass = m.get("sclass_id")
+                    comp = competitions.get(sclass)
+                    if comp and comp.get("name_cn"):
+                        m["competition_name_cn"] = comp["name_cn"]
                     if not m.get("business_date"):
                         m["business_date"] = business_date
                     matches.append(m)
