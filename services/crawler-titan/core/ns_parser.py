@@ -152,17 +152,19 @@ def parse_media(html: str) -> dict:
     m = re.search(r"信[心]指[数數]\s*[-:]\s*([^\s]+(?:\s*[^\s]+)?)", text)
     if m:
         res["confidence_index"] = m.group(1).strip()
-    # 对赛成绩 / 對賽成績
-    m = re.search(r"对[赛賽]成[绩績]\s*[-:]\s*([^\s]+(?:\s*[^\s]+)*?)(?=\s*[^\s]{2,}?乃|\s*$)", text)
+    # 对赛成绩 / 對賽成績：值 = "队名 数字胜 数字和 数字负" + 正文（繁简体：胜/勝 负/負）
+    m = re.search(r"对[赛賽]成[绩績]\s*[-:]\s*(.+)", text)
     if m:
-        res["h2h_record"] = m.group(1).strip()
-    # 分析正文 = 去掉已知标签后的剩余长文本
-    body = re.sub(_trend_pat, "", text)
-    body = re.sub(r"信[心]指[数數]\s*[-:]\s*[^\s]+(?:\s*[^\s]+)?", "", body)
-    body = re.sub(r"对[赛賽]成[绩績]\s*[-:]\s*[^\s]+(?:\s*[^\s]+)*?", "", body)
-    body = _norm_text(body)
-    if len(body) >= 10:
-        res["media_analysis"] = body
+        val = m.group(1).strip()
+        rec = re.match(r"([^\s]{2,20}?)\s*(\d+[胜勝])\s*(\d+[和])\s*(\d+[负負])\s*(.*)", val)
+        if rec:
+            team, ws, dr, ls, body = rec.groups()
+            res["h2h_record"] = f"{team} {ws} {dr} {ls}".strip()
+            if body.strip():
+                res["media_analysis"] = body.strip()
+        else:
+            # 无战绩前缀（异常格式）：整段作正文
+            res["media_analysis"] = val
     return res
 
 
