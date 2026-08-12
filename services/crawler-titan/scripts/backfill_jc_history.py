@@ -1,5 +1,5 @@
 """
-历史赛程回填：按指定业务日期，从 jc.titan007.com 获取赛程并爬取
+历史赛程回填：按指定业务日期区间，从 jc.titan007.com 获取赛程并爬取
 analysis / 亚盘+大小球 / 欧赔，直接写 titan 库对应表。
 
 与 jc-workset（在售场次、轮询、排干）不同：
@@ -18,9 +18,16 @@ analysis / 亚盘+大小球 / 欧赔，直接写 titan 库对应表。
     unmatched.log  未能与竞彩匹配的场次（追加）
 
 用法：
+    # 区间（默认由今去古，--asc 改由古至今）
+    python scripts/backfill_jc_history.py --from 2016-01-01 --to 2026-08-11
+    python scripts/backfill_jc_history.py --from 2016-01-01 --to 2026-08-11 --asc
+    # 单日（等价 --from=X --to=X）
     python scripts/backfill_jc_history.py --date 2026-08-11
-    python scripts/backfill_jc_history.py --date 2026-08-11 --skip-mapping
+    # 断点续跑：该日全部场次已有 analysis 数据则跳过爬取（仅补 mapping）
+    python scripts/backfill_jc_history.py --from 2016-01-01 --to 2026-08-11 --skip-existing
+    # 调试
     python scripts/backfill_jc_history.py --date 2026-08-11 --no-write
+    python scripts/backfill_jc_history.py --date 2026-08-11 --skip-mapping
 """
 import argparse
 import datetime as dt
@@ -152,7 +159,7 @@ def check_matches(date: str) -> tuple:
 
 # ─── 主流程 ────────────────────────────────────────────────────
 
-def backfill_date(date: str, no_write: bool, skip_mapping: bool) -> int:
+def backfill_date(date: str, no_write: bool, skip_mapping: bool, skip_existing: bool = False) -> int:
     _ensure_dir(BACKFILL_DIR)
     global UNMATCHED_PATH
     day_log = os.path.join(BACKFILL_DIR, f"{date}.log")
@@ -174,6 +181,41 @@ def backfill_date(date: str, no_write: bool, skip_mapping: bool) -> int:
     parsed = jc_parser.parse_jc_result(text, date)
     matches = parsed.get("matches") or []
     log(f"[schedule] {date} 共 {len(matches)} 场")
+
+    if not matches:
+        log(f"[empty] {date} 无竞彩场次，跳过爬取与 mapping")
+        log(f"===== backfill {date} done {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====")
+        _log_append(day_log, "\n".join(log_lines))
+        return 0
+
+    # 断点续跑：该日 analysis 主表已有全部场次 → 跳过爬取（仅 mapping）
+    if skip_existing and not no_write:
+        sids = [m.get("sid") for m in matches]
+        existing = set()
+        try:
+            conn_probe = db.connect()
+            try:
+                with conn_probe.cursor() as cur:
+                    cur.execute(
+                        "SELECT schedule_id FROM titan_analysis_matches WHERE schedule_id = ANY(%s)",
+                        [sids])
+                    existing = {r[0] for r in cur.fetchall()}
+            finally:
+                conn_probe.close()
+        except Exception as e:  # noqa: BLE001
+            print(f"  [skip-existing] 查询失败: {e}")
+        if len(existing) == len(sids):
+            log(f"[skip-existing] {date} 全部场次已有 analysis 数据，跳过爬取")
+            if not skip_mapping:
+                ok, out = run_mapping(date)
+                log(f"[mapping] run-mapping --date {date} exit_ok={ok}")
+                matched, unmatched = check_matches(date)
+                log(f"[match] {date} cross_source_matches={matched + len(unmatched)} 命中竞彩={matched} 未匹配={len(unmatched)}")
+                for sid in unmatched:
+                    _log_append(UNMATCHED_PATH, f"{date} sid={sid} reason=jc_match_id NULL")
+            log(f"===== backfill {date} done {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====")
+            _log_append(day_log, "\n".join(log_lines))
+            return 0
 
     conn = db.connect() if not no_write else None
     stats = []
@@ -219,18 +261,65 @@ def backfill_date(date: str, no_write: bool, skip_mapping: bool) -> int:
     return 0
 
 
+def _date_range(from_s: str, to_s: str, asc: bool) -> list:
+    """生成 [from, to] 日期列表，默认由今去古（to → from）。"""
+    d0 = dt.date.fromisoformat(from_s)
+    d1 = dt.date.fromisoformat(to_s)
+    if d0 > d1:
+        d0, d1 = d1, d0
+    days = []
+    cur = d0
+    while cur <= d1:
+        days.append(cur.isoformat())
+        cur += dt.timedelta(days=1)
+    if not asc:
+        days.reverse()
+    return days
+
+
 def main():
-    p = argparse.ArgumentParser(description="历史赛程回填（单日）")
-    p.add_argument("--date", required=True, help="业务日期 YYYY-MM-DD")
+    p = argparse.ArgumentParser(description="历史赛程回填（区间 / 单日）")
+    p.add_argument("--from", dest="from_date", help="起始业务日期 YYYY-MM-DD")
+    p.add_argument("--to", dest="to_date", help="结束业务日期 YYYY-MM-DD")
+    p.add_argument("--date", help="单日业务日期 YYYY-MM-DD（等价 --from=X --to=X）")
+    p.add_argument("--asc", action="store_true", help="由古至今（默认由今去古）")
     p.add_argument("--no-write", action="store_true", help="只抓取不写库（dry-run）")
     p.add_argument("--skip-mapping", action="store_true", help="跳过 mapping 调用")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="该日全部场次已有 analysis 数据则跳过爬取（断点续跑）")
     args = p.parse_args()
-    try:
-        dt.date.fromisoformat(args.date)
-    except ValueError:
-        print("非法日期:", args.date)
+
+    # 解析区间
+    if args.date:
+        try:
+            dt.date.fromisoformat(args.date)
+        except ValueError:
+            print("非法日期:", args.date)
+            sys.exit(2)
+        from_date = to_date = args.date
+    elif args.from_date and args.to_date:
+        from_date, to_date = args.from_date, args.to_date
+    else:
+        print("必须提供 --from/--to 或 --date")
         sys.exit(2)
-    sys.exit(backfill_date(args.date, args.no_write, args.skip_mapping))
+
+    try:
+        days = _date_range(from_date, to_date, args.asc)
+    except ValueError:
+        print("非法日期区间:", from_date, to_date)
+        sys.exit(2)
+
+    print(f"===== 历史赛程回填区间 {from_date} ~ {to_date} 共 {len(days)} 天 "
+          f"(no_write={args.no_write} skip_mapping={args.skip_mapping} "
+          f"skip_existing={args.skip_existing}) =====")
+    fail_days = 0
+    for i, d in enumerate(days, 1):
+        print(f"\n[{i}/{len(days)}] {d}")
+        rc = backfill_date(d, args.no_write, args.skip_mapping, args.skip_existing)
+        if rc != 0:
+            fail_days += 1
+    print(f"\n===== 全部完成：{len(days)} 天，失败 {fail_days} 天 =====")
+    sys.exit(1 if fail_days else 0)
 
 
 if __name__ == "__main__":
