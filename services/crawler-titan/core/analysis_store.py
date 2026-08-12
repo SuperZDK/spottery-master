@@ -28,16 +28,16 @@ def upsert_analysis(schedule_id: int, matches: dict, h2h: list,
             # 1) 主表
             cur.execute(
                 """INSERT INTO titan_analysis_matches
-                     (schedule_id, competition_id, competition_name_en, season,
+                     (schedule_id, competition_id, competition_name_cn,
                       home_team_id, away_team_id, home_team, away_team, match_time,
                       media_home_trend, media_home_path, media_away_trend, media_away_path,
                       confidence_index, h2h_record, media_analysis,
                       standings)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT (schedule_id) DO UPDATE SET
                      competition_id=EXCLUDED.competition_id,
-                     competition_name_en=EXCLUDED.competition_name_en,
-                     season=EXCLUDED.season, home_team_id=EXCLUDED.home_team_id,
+                     competition_name_cn=EXCLUDED.competition_name_cn,
+                     home_team_id=EXCLUDED.home_team_id,
                      away_team_id=EXCLUDED.away_team_id, home_team=EXCLUDED.home_team,
                      away_team=EXCLUDED.away_team, match_time=EXCLUDED.match_time,
                      media_home_trend=EXCLUDED.media_home_trend, media_home_path=EXCLUDED.media_home_path,
@@ -46,7 +46,7 @@ def upsert_analysis(schedule_id: int, matches: dict, h2h: list,
                      media_analysis=EXCLUDED.media_analysis, standings=EXCLUDED.standings,
                      scraped_at=now()""",
                 [schedule_id,
-                 matches.get("competition_id"), matches.get("competition_name_en"), matches.get("season"),
+                 matches.get("competition_id"), matches.get("competition_name_cn"),
                  matches.get("home_team_id"), matches.get("away_team_id"),
                  matches.get("home_team"), matches.get("away_team"), matches.get("match_time"),
                  matches.get("media_home_trend"), matches.get("media_home_path"),

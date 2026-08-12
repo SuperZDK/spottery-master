@@ -109,8 +109,7 @@ def fetch_analysis(schedule_id: int, match_in: dict = None):
     record = analysis_to_dict(page)
     m = {
         "competition_id": match_in.get("sclass_id") if match_in else None,
-        "competition_name_en": match_in.get("competition_name_en") if match_in else None,
-        "season": match_in.get("season") if match_in else None,
+        "competition_name_cn": match_in.get("competition_name_cn") if match_in else None,
         "home_team_id": match_in.get("home_team_id") if match_in else None,
         "away_team_id": match_in.get("away_team_id") if match_in else None,
         "home_team": match_in.get("home_team") if match_in else None,

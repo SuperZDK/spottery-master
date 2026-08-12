@@ -388,7 +388,8 @@ def _load_titan_analysis(sid: int) -> Optional[dict]:
     with titan_engine.connect() as conn:
         row = conn.execute(
             text(
-                """SELECT briefing_title, briefing_text, standings
+                """SELECT competition_name_cn, home_team, away_team, standings,
+                          media_analysis, confidence_index, h2h_record
                    FROM titan_analysis_matches
                    WHERE schedule_id = :id"""
             ),
@@ -491,11 +492,11 @@ def _load_titan_briefing(sid: int) -> Optional[Briefing]:
     analysis = _load_titan_analysis(sid)
     if not analysis:
         return None
-    title = analysis.get("briefing_title")
-    content = analysis.get("briefing_text")
-    if not title and not content:
+    # 旧 briefing_title/briefing_text 已删；现以 media_analysis（心水推荐正文）作为简报内容
+    content = analysis.get("media_analysis")
+    if not content:
         return None
-    return Briefing(title=title, content=content)
+    return Briefing(title=None, content=content)
 
 
 def _load_titan_odds(sid: int) -> tuple[list[OddsHistoryPoint], list[OddsHistoryPoint]]:

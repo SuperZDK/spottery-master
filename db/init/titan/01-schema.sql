@@ -152,8 +152,7 @@ CREATE INDEX idx_titan_jc_schedule_sclass ON titan_jc_schedule (sclass_id);
 CREATE TABLE titan_analysis_matches (
     schedule_id        INTEGER PRIMARY KEY,   -- 本场 titan sid
     competition_id     INTEGER,               -- 本场赛事 id（原 sclass_id，语义更明确）
-    competition_name_en TEXT,                 -- 赛事英文名（冗余）
-    season             TEXT,                  -- 赛季（冗余）
+    competition_name_cn TEXT,                 -- 赛事中文名（冗余）
     home_team_id       INTEGER,
     away_team_id       INTEGER,
     home_team          TEXT,

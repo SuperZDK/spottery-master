@@ -182,6 +182,12 @@ def backfill_date(date: str, no_write: bool, skip_mapping: bool, skip_existing: 
     matches = parsed.get("matches") or []
     log(f"[schedule] {date} 共 {len(matches)} 场")
 
+    # 注入联赛中文名（JcResult 报文 competitions 段自带，100% 覆盖）
+    comps = parsed.get("competitions") or {}
+    for m in matches:
+        c = comps.get(m.get("sclass_id")) or {}
+        m["competition_name_cn"] = c.get("name_cn")
+
     if not matches:
         log(f"[empty] {date} 无竞彩场次，跳过爬取与 mapping")
         log(f"===== backfill {date} done {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====")
