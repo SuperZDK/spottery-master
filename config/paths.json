@@ -1,0 +1,26 @@
+{
+  "sources": {
+    "sofascore": {
+      "label": "Sofascore 爬虫数据",
+      "root": "D:/data/VSCode_file/vscode_file/crawler/data",
+      "schedules_dir": "D:/data/VSCode_file/vscode_file/crawler/data/schedules_v3",
+      "details_dir": "D:/data/VSCode_file/vscode_file/crawler/data/details"
+    },
+    "titan": {
+      "label": "球探爬虫数据",
+      "root": "D:/data/VSCode_file/vscode_file/titan007_pro/data",
+      "schedule_dir": "D:/data/VSCode_file/vscode_file/titan007_pro/data/schedule",
+      "analysis_dir": "D:/data/VSCode_file/vscode_file/titan007_pro/data/analysis",
+      "odds_dir": "D:/data/VSCode_file/vscode_file/titan007_pro/data/odds",
+      "jc_dir": "D:/data/VSCode_file/vscode_file/titan007_pro/data/jc"
+    },
+    "sporttery": {
+      "label": "竞彩爬虫数据",
+      "root": "D:/data/VSCode_file/spottery-master/services/crawler-sporttery/data/jingcai",
+      "workset": "D:/data/VSCode_file/spottery-master/services/crawler-sporttery/data/jingcai/workset.json",
+      "matches": "D:/data/VSCode_file/spottery-master/services/crawler-sporttery/data/jingcai/matches",
+      "daily_dir": "D:/data/VSCode_file/vscode_file/spottery/scrapers/data/jingcai/daily",
+      "matches_dir": "D:/data/VSCode_file/vscode_file/spottery/scrapers/data/jingcai/matches"
+    }
+  }
+}

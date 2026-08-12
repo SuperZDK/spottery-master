@@ -1,8 +1,9 @@
 # Spottery 重构架构设计文档
 
-> 版本：v0.1（草案待评审）
-> 日期：2026-08-02
+> 版本：v0.2
+> 日期：2026-08-06
 > 状态：设计评审中，尚未开始编码
+> 本次更新（v0.2）：unified_* 对齐规则与 DDL 定稿、后端 API 设计定稿、旧平台表废弃决策、开放问题 #1/#2 解决
 
 ---
 
@@ -20,7 +21,7 @@
 10. [可插拔 SourceAdapter 架构](#十可插拔-sourceadapter-架构)
 11. [数据流与一致性设计](#十一数据流与一致性设计)
 12. [缓存策略](#十二缓存策略)
-13. [后端控制面 API](#十三后端控制面-api)
+13. [后端 API 设计](#十三后端-api-设计)
 14. [Docker 编排](#十四docker-编排)
 15. [迁移路径（三阶段）](#十五迁移路径三阶段)
 16. [技术栈决策](#十六技术栈决策)
@@ -69,6 +70,10 @@
 | 容器拆分 | 三个爬虫**各自独立容器**，暂不合并 |
 | 缓存 | **第一版不加 Redis**，聚合库 + PG 索引作为唯一存储层 |
 | 映射表 | **JSONB 数组方案**，人工维护后上传，可扩展新数据源 |
+| 旧平台表 | **`matches` / `teams` / `leagues` 不迁移、废弃**，由 unified_* 完全取代（2026-08-06） |
+| 对齐规则 | 对齐键 = league + home + away + kickoff_time，**±90 分钟容差**；任一源 FINISHED 即取完场；竞彩终赔/单关恒取竞彩源（2026-08-06） |
+| 内容接口鉴权 | **前台内容全部公开只读**，登录仅限认证与控制面（2026-08-06） |
+| 分析数据接口 | **单详情聚合接口 + 模块可选 + 前端逐块容错**（2026-08-06） |
 
 ---
 
@@ -685,27 +690,53 @@ CREATE TABLE unified_teams (
 
 -- 统一比赛（跨源对齐后的比赛视图）
 CREATE TABLE unified_matches (
-    id                  SERIAL PRIMARY KEY,
-    unified_league_id   INTEGER REFERENCES unified_leagues(id),
-    unified_home_id     INTEGER REFERENCES unified_teams(id),
-    unified_away_id     INTEGER REFERENCES unified_teams(id),
-    kickoff_time        TIMESTAMPTZ NOT NULL,
-    status              TEXT,                   -- SCHEDULED / LIVE / FINISHED
+    id                  BIGSERIAL PRIMARY KEY,  -- 统一比赛 ID
+    kickoff_time        TIMESTAMPTZ NOT NULL,   -- 开赛时间（对齐主键核心，NOT NULL 便于索引与对齐）
+
+    -- 对齐引用（指向 unified_leagues / unified_teams；NULL = 该联赛/球队尚未映射）
+    unified_league_id   INTEGER,
+    unified_home_id     INTEGER,
+    unified_away_id     INTEGER,
+
+    -- 跨源合并结果（状态/比分取自主源，规则见下方「对齐规则」）
+    status              TEXT NOT NULL,          -- SCHEDULED / LIVE / FINISHED / POSTPONED
     home_score          INTEGER,
     away_score          INTEGER,
-    season_key          TEXT,
-    -- 各源引用
+    status_source       TEXT,                   -- 状态/比分取自哪个源（可追溯）
+    season_key          TEXT,                   -- 如 "2025/26"
+
+    -- 各源引用（JSONB，可扩展新源）
     source_refs         JSONB NOT NULL DEFAULT '{}',
     -- 例: {"sofascore": {"match_id": 12345},
-    --      "jingcai": {"match_id": 1022716, "match_num": "周三001"},
+    --      "jingcai": {"match_id": 1022716, "match_num": "周六012"},
     --      "titan007": {"schedule_id": 2789129}}
+
+    -- 竞彩日赛冗余列（仅竞彩场次有值，其他源为 NULL；避免竞彩日赛页 JOIN 源库）
+    business_date       DATE,                   -- 竞彩销售日（开售日期）
+    match_num           TEXT,                   -- 比赛编号（如 "周六012"）
+    single_spf          SMALLINT,               -- 五池单关标记 0/1
+    single_rqspf        SMALLINT,
+    single_ttg          SMALLINT,
+    single_hafu         SMALLINT,
+    single_crs          SMALLINT,
+
+    -- 对齐审计
+    aligned_sources     SMALLINT NOT NULL DEFAULT 1,  -- 已对齐的源数量（1~3）
+    last_aligned_at     TIMESTAMPTZ DEFAULT now(),
     created_at          TIMESTAMPTZ DEFAULT now(),
     updated_at          TIMESTAMPTZ DEFAULT now()
 );
-CREATE INDEX idx_unified_matches_kickoff ON unified_matches (kickoff_time);
-CREATE INDEX idx_unified_matches_league ON unified_matches (unified_league_id);
-CREATE INDEX idx_unified_matches_team ON unified_matches (unified_home_id, unified_away_id);
+CREATE INDEX idx_um_kickoff  ON unified_matches (kickoff_time);
+CREATE INDEX idx_um_league   ON unified_matches (unified_league_id);
+CREATE INDEX idx_um_team     ON unified_matches (unified_home_id, unified_away_id);
+CREATE INDEX idx_um_business ON unified_matches (business_date);   -- 竞彩日赛页
 ```
+
+> **对齐规则（已确认）**：
+> 1. **对齐键**：`unified_league_id + unified_home_id + unified_away_id + kickoff_time`，开赛时间允许 **±90 分钟**容差。
+> 2. **流程**：每源新比赛 → 聚合引擎用 `cross_source_*` 映射表解析出 unified 三 ID → 在 `unified_matches` 中按对齐键查找匹配行：命中则 merge（补 `source_refs` / 更新字段），未命中则新建行。
+> 3. **未对齐比赛**：只有单个源有数据（如仅竞彩开设、或仅球探收录）的场次**也建行**，`aligned_sources=1`，前端照常显示，只是缺少部分源的增强数据。
+> 4. **状态/比分冲突规则**：任一源 FINISHED 即取 FINISHED + 比分（完场信息优先）；同为进行中取 `last_aligned_at` 最新的源；**竞彩终赔 / 单关标记永远取竞彩源**（见 titan007 文档 1.1.1 取数链路）。
 
 ### 9.2 聚合计算结果表
 
@@ -776,8 +807,8 @@ CREATE TABLE aggregated_odds_history (
 
 ### 9.3 平台基础表（沿用现有结构）
 
-- `users` / `predictions` / `briefings` / `teams` / `leagues` / `matches` / `odds_history` / `injuries` / `team_aliases` / `match_source_mappings`（现有 10 张表，结构基本保留，部分表被 unified_* 取代后弃用或保留兼容）。
-- 现有 `matches` / `teams` / `leagues` 若与 unified_* 语义重叠，规划合并方案（Phase 3 处理）。
+- `users` / `predictions` / `briefings` / `injuries` / `odds_history` 等平台业务表（结构基本保留）。
+- **`teams` / `leagues` / `matches` 旧表不迁移、废弃**，由 `unified_teams` / `unified_leagues` / `unified_matches` 完全取代（已确认，见 17.2 #1）。`team_aliases` / `match_source_mappings` 由 `cross_source_*` 映射表取代。
 
 ---
 
@@ -917,7 +948,76 @@ CREATE TABLE aggregation_cursors (
 
 ---
 
-## 十三、后端控制面 API
+## 十三、后端 API 设计
+
+> 所有路由挂在 `/api/v1` 前缀下。分三层：**前台只读内容**（公开）、**认证**（用户）、**控制面**（管理员 + 内部密钥）。**已定稿**（2026-08-06，见 17.2）。
+
+### 13.1 分层总览
+
+| 层 | 鉴权 | 读取数据源 | 说明 |
+|---|---|---|---|
+| 前台只读内容 | 公开 | spottery 聚合库（unified_*/aggregated_*） | 赛程/赔率/积分榜/状态/交锋/预测等展示数据 |
+| 认证 | JWT | users 表 | 注册/登录/个人中心 |
+| 控制面 | 管理员 + `X-Internal-Token` | 全部 | 触发爬虫/聚合、上传映射、查游标 |
+
+**设计原则：**
+1. **内容接口全部公开只读**，登录仅限认证与控制面；未来若做会员制，再在内容层加订阅标记收紧（17.2 记录）。
+2. 后端内容接口**一律查聚合库**，不直连源库（读源库仅由聚合引擎/内部接口完成）。
+3. **分析数据采用「单详情聚合接口 + 模块可选 + 前端逐块容错」**：某模块无数据返回 `null` / 空数组，前端按块判空显示，不阻塞整页。
+
+### 13.2 前台只读内容 API（公开）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/matches` | unified_matches 分页列表 |
+| GET | `/matches/{id}` | ★单详情聚合接口（一次返回全部模块，见下） |
+| GET | `/matches/{id}/odds/{type}` | 赔率走势（唯一保留的细分接口，走势图独立加载） |
+| GET | `/leagues` | 联赛列表 |
+| GET | `/leagues/{id}/standings` | aggregated_standings 积分榜 |
+| GET | `/teams` | 球队列表 |
+| GET | `/teams/{id}` | 球队详情 + aggregated_form |
+| GET | `/analysis/h2h` | 交锋历史（team1_id + team2_id） |
+
+**`/matches` 查询参数**：`business_date`（竞彩日赛页）/ `date` / `league` / `status` / `source` / `page` / `page_size`。
+竞彩日赛 = `/matches?source=jingcai&business_date=YYYY-MM-DD`，终赔与单关取自 unified_matches 冗余列 + `jingcai_odds_*` 最后快照（见 7.2 / titan007 1.1.1）。
+
+> **MVP 直读过渡（2026-08-11 已实施）**：聚合引擎尚未建成，`/matches?source=jingcai&business_date=` 由 `services/api/app/services/jc_daily.py` 实现**双源直读**，前端 `frontend/`（自旧 spottery_pro 迁移）首页即用此接口。判据 = 该 business_date 的排干状态（workset.completeDate 游标）：
+> - `business_date ∈ workset.dates`（未排干）→ 读 `crawler-sporttery` 的 `workset.json` + `matches/{id}.json`（5 池最新赔率取 `oddsHistory` 最后一条）
+> - `business_date ≤ completeDate`（已排干）→ 读 sporttery 源库 `jingcai_schedules` + `jingcai_odds_*` 各池最后快照（`DISTINCT ON (match_id) ORDER BY snapshot_at DESC`）
+> - 其余（未来/空）→ 空列表
+>
+> 响应结构见 `services/api/app/schemas/matches.py`：`{date, weekday, source, matches[]}`，每场含 5 池 `odds` + `singles`（单关标记）+ 由 `matchResult`/`pool_status`/`kickoff_time` 推导的 `status`。**待聚合引擎建成后回切到 unified_matches（架构原则 13.1-2）。**
+
+**`/matches/{id}` 单详情聚合接口响应结构（模块全部可选）：**
+
+```json
+{
+  "match":      { "id": 123, "kickoff_time": "...", "status": "FINISHED",
+                  "home_team": "利物浦", "away_team": "曼联", "score": "2:1",
+                  "league": "英超", "season_key": "2025/26",
+                  "match_num": "周六012", "single_spf": 1, "source_refs": {...} },
+  "standings":  { "home": [...], "away": [...] },
+  "form":       { "home": [...], "away": [...] },
+  "h2h":        [...],
+  "odds":       { "spf": [...], "rqspf": [...] },
+  "prediction": null,
+  "briefing":   "暂无赛前简报",
+  "comparison": {...},
+  "injuries":   null
+}
+```
+
+前端按块判空：`prediction` 为 null 显示"暂无预测"、`injuries` 为 null 隐藏伤停区块，整页不因单块缺失崩溃。
+
+### 13.3 认证 API
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/auth/register` | 注册（限流 5/min） |
+| POST | `/auth/login` | 登录（限流 10/min） |
+| GET | `/users/me` | 当前用户信息 |
+
+### 13.4 控制面 API
 
 ```python
 # ✨ 新增路由: services/api/app/routers/source_admin.py
@@ -957,6 +1057,20 @@ POST /rebuild      # 全量重建
 GET  /status       # 状态
 GET  /health       # 健康检查
 ```
+
+### 13.5 旧版接口迁移对照（spottery_pro → 重构版）
+
+| 旧接口 | 去向 |
+|---|---|
+| `/matches`（平台 Match 表） | `/matches`（unified_matches） |
+| `/matches/betting`（JingcaiMatch 表） | `/matches?source=jingcai&business_date=` |
+| `/matches/{id}` + 10 个拆分接口（odds/odds-history/analysis/briefing/comparison/injuries） | `/matches/{id}` 单详情聚合接口 |
+| `/matches/{id}/odds` + `/matches/{id}/odds/history` | `/matches/{id}/odds/{type}` |
+| `/analysis/h2h`、`/analysis/teams/{id}/form` | 同路径，改读 aggregated_* |
+| `/analysis/*`（旧 async 版，与 matches 重复） | 删除 |
+| `/scraper/*`（未接线 stub） | 删除（爬虫直写源库 + 控制面触发） |
+| `/internal/matches/upsert`、`/internal/odds/snapshot`（爬虫推送） | 删除（爬虫直写源库，聚合引擎拉取） |
+| `/admin/import/start\|stop\|status\|info` | 收敛为 `/internal/source/{source}/rebuild` + `/status` |
 
 ---
 
@@ -1102,7 +1216,7 @@ volumes:
 | 3c | 性能优化（物化视图、索引、连接池、PG 参数调优） |
 | 3d | 备份策略上线（4 库每日备份） |
 | 3e | 部署到 Linux 云服务器，补充监控（日志、健康检查） |
-| 3f | 统一旧平台表与 unified_* 的兼容/废弃 |
+| 3f | 废弃旧平台表 `matches` / `teams` / `leagues`（已确认不迁移，见 9.3） |
 
 ---
 
@@ -1153,10 +1267,10 @@ volumes:
 
 ### 17.2 开放问题（待评审确认）
 
-1. 现有平台基础表（`matches` / `teams` / `leagues`）与新的 `unified_*` 表语义重叠，Phase 3 是否合并/废弃？
-2. 聚合引擎的计算规则（积分榜口径、状态计算 N 场）是否需要与现有前端分析页面对齐，还是重新定义？
+1. ~~现有平台基础表（`matches` / `teams` / `leagues`）与新的 `unified_*` 表语义重叠，Phase 3 是否合并/废弃？~~ **已解决（2026-08-06）：不迁移、废弃，unified_* 完全取代**（见 9.3）。
+2. ~~聚合引擎的计算规则（积分榜口径、状态计算 N 场）是否需要与现有前端分析页面对齐，还是重新定义？~~ **部分已解决（2026-08-06）**：对齐键（±90 分钟容差）与状态/比分冲突规则已定稿（见 9.1）；积分榜/状态/交锋的具体计算口径迁移时以现有 `matches.py` 内联算法为基线（`_compute_standings` / `_stat_from_results`），是否调整待聚合引擎开发时评审。
 3. `jingcai_*` 17 张表迁移到独立库后，现有 `import_jingcai.py` 是否退役，改由爬虫直接写库？
-4. 前端页面是否全量切换到聚合库，还是过渡期保持对现有接口兼容？
+4. 前端页面是否全量切换到聚合库，还是过渡期保持对现有接口兼容？—— **API 设计已定稿（见第十三章）**，过渡期兼容与否待前端阶段确认。
 5. 映射表上传接口的鉴权与校验（防误传损坏数据）。
 6. 爬虫容器内定时任务与后端手动触发的并发控制（防止同一源同时抓取）。
 
@@ -1166,9 +1280,10 @@ volumes:
 
 | 数据源 | JSON 文件数 | 预期入库表数 | 预期行数 |
 |---|---|---|---|
-| Sofascore | ~88,000 | 3 张 | 赛程 ~2 万行/季 × 10 季 |
+| Sofascore | ~88,000 | 15 张 | 赛程 82,288 + 统计 ≈39 万 + 球队 2,159 |
 | 竞彩 | ~80,800 | 8 张 | 约 222 万行（按 10 万场估算） |
 | 球探 | ~515,757 | 8 张 | 赔率 ≈1,340 万 + 分析 55,314 + 赛程 297,120 |
+| 聚合库（spottery） | — | unified 3 + aggregated 4 | unified_matches ≤ 各源去重并集（估算 25~30 万，待对齐验证）；unified_teams ≈ 数千；aggregated_* 由各源规模推导 |
 
 ## 附录 B：关键名词
 
@@ -1180,3 +1295,76 @@ volumes:
 | 聚合引擎 | 读源库 → 对齐 → 计算 → 写聚合库的后端模块 |
 | 跨源映射 | cross_source_leagues / cross_source_teams，人工维护 |
 | 双写 | 爬虫同时写 JSON 和 PG，验证一致后停 JSON |
+
+---
+
+## 附录 C：PG 导入期调优参数
+
+> 三源（sofascore / jingcai / titan）**全量批量导入**期间为对抗开发环境稳定性与提速临时调整的 5 项 PG 参数。本文记录其使用场景、开启方式、为何必须复原、如何复原。
+
+### C.1 背景
+
+Docker Desktop（Windows）的 bind mount 走 **9p 协议**，大并发写入时 PG 的 postmaster 会频繁崩溃（实测日志：`SIGKILL to recalcitrant children`、`invalid magic number in WAL segment`、`database system was interrupted`），且每次崩溃后需 WAL 重放恢复。批量导入（每源数百万行、数十万文件）期间，通过降低 WAL/fsync 开销来缓解写入压力、缩短窗口、配合脚本的窗口事务 + 断点重试扛过崩溃循环。
+
+### C.2 五项参数
+
+| 参数 | 默认 | 调优值 | 作用 |
+|---|---|---|---|
+| fsync | on | off | 关闭每事务 fsync，减少写盘等待 |
+| full_page_writes | on | off | 关闭检查点后整页写 |
+| synchronous_commit | on | off | 不等 WAL flush 即返回提交 |
+| checkpoint_timeout | 300s | 900s | 拉长检查点间隔，减少 9p 写入风暴 |
+| max_wal_size | 1024MB | 4096MB | 加大 WAL 容量，减少检查点频率 |
+
+### C.3 使用场景
+
+- **仅限开发环境**：Docker Desktop（Windows）+ 9p bind mount 数据卷。
+- **仅限大规模批量导入/回填**：三源一次性全量导入（千万行级）。
+- **不适用**：生产（Linux 原生磁盘，9p 不存在）；稳态增量更新（每日新文件、赔率 append，负载极小，默认参数足够）。
+
+### C.4 开启方式
+
+```sql
+ALTER SYSTEM SET fsync = off;
+ALTER SYSTEM SET full_page_writes = off;
+ALTER SYSTEM SET synchronous_commit = off;
+ALTER SYSTEM SET checkpoint_timeout = 900;
+ALTER SYSTEM SET max_wal_size = 4096;
+SELECT pg_reload_conf();
+```
+
+验证生效：
+
+```sql
+SHOW fsync; SHOW full_page_writes; SHOW synchronous_commit;
+SHOW checkpoint_timeout; SHOW max_wal_size;
+```
+
+### C.5 为何必须复原
+
+1. **数据安全底线**：`fsync=off` 在崩溃时 **WAL 可能损坏**（实测 `invalid magic number in WAL segment`），恢复靠丢弃损坏尾部 → 有丢失已提交数据风险；`full_page_writes=off` 崩溃恢复可能产生页面不一致；`synchronous_commit=off` 崩溃时可能丢最近提交。
+2. **稳态不需要**：增量更新负载极小，默认参数毫无性能压力。
+3. **生产必须默认**：PG 持久性保障要求 `fsync=on`，任何环境都不应在常态下关闭。
+
+### C.6 如何复原
+
+```sql
+ALTER SYSTEM RESET fsync;
+ALTER SYSTEM RESET full_page_writes;
+ALTER SYSTEM RESET synchronous_commit;
+ALTER SYSTEM RESET checkpoint_timeout;
+ALTER SYSTEM RESET max_wal_size;
+SELECT pg_reload_conf();
+```
+
+验证回落默认值：
+
+| 参数 | 复原后 |
+|---|---|
+| fsync | on |
+| full_page_writes | on |
+| synchronous_commit | on |
+| checkpoint_timeout | 5min |
+| max_wal_size | 1GB |
+
+**说明**：`ALTER SYSTEM` 持久化写入 `postgresql.auto.conf`（数据卷内），`RESET` 即删除对应条目；容器/Docker Desktop 重启不会重置，无需额外操作。

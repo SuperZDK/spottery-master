@@ -690,3 +690,55 @@ DO NOTHING;
 ### 14.5 分区说明
 
 **第一版不做表分区**。赔率查询总走 `schedule_id` 唯一键索引（看某场走势），与表大小无关；3000 万行 append-only 表 PG 完全撑得住。将来若出现"按比赛时间大范围分析"慢查询或表过亿，再 `ALTER TABLE ... PARTITION BY RANGE (change_time)` 按赛季分区，并预创建下赛季分区。
+
+---
+
+## 十五、titan_jc_schedule — 竞彩开设赛程镜像
+
+> **定位**：竞彩（sporttery/jingcai）在球探侧的赛程镜像，用 **titan `sid`** 标识同一场比赛，支撑 §1.1"标记该场是否竞彩开设"。与 §1.8"竞彩赔率不进球探库"**不冲突**：本表存的是赛程与比分（titan sid 视角），非竞彩赔率/投票（后者仍从竞彩源库取）。
+> **来源**：`jc/history/{date}.json`（3,869 个文件，70,337 场，`sid` 全局唯一）。该目录为爬虫新爬的竞彩历史赛程（titan 格式），`match_map.json`（titan_sid ↔ jc_match_id）与 `team_map.json` 是**派生产物，不落库**；跨源对齐可用 `(business_date, match_num)` 与 `jingcai_schedules` JOIN（实测 300 抽样命中 297）。
+> **软关联**：`sclass_id` → titan_competitions；`home_team_id / away_team_id` → titan_teams；`(business_date, match_num)` → jingcai_schedules（跨库）。
+
+```sql
+CREATE TABLE titan_jc_schedule (
+    sid             INTEGER PRIMARY KEY,   -- titan 比赛 id（history 全局唯一）
+    business_date   DATE NOT NULL,         -- 竞彩销售日
+    kickoff_time    TIMESTAMP,             -- kickoff（"2026-08-01 18:30"）
+    status          SMALLINT,              -- -1 完场；-10 异常（12 场）
+    match_num       TEXT,                  -- "周六001"（= 竞彩编号）
+    sclass_id       INTEGER,               -- 软关联 titan_competitions（134 个）
+    sub_id          INTEGER,               -- 阶段/子联赛
+    home_team_id    INTEGER,               -- 软关联 titan_teams
+    away_team_id    INTEGER,
+    home_team       TEXT,                  -- 简体名
+    away_team       TEXT,
+    home_team_en    TEXT,                  -- 英文名
+    away_team_en    TEXT,
+    full_score      TEXT,                  -- "0-3"
+    half_score      TEXT,                  -- "0-1"
+    home_score      INTEGER,               -- 由 full_score "0-3" 拆出
+    away_score      INTEGER,
+    updated_at      TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX idx_titan_jc_schedule_business_date ON titan_jc_schedule (business_date);
+CREATE INDEX idx_titan_jc_schedule_sclass ON titan_jc_schedule (sclass_id);
+```
+
+**字段来源与转化**：
+
+| 列 | JSON 来源 | 类型转换/口径 | 备注 |
+|---|---|---|---|
+| sid | `matches[].sid` | 原样 | 主键，全局唯一 |
+| business_date | `matches[].business_date`（= 文件日期） | 字符串 → DATE | 销售日 |
+| kickoff_time | `matches[].kickoff` | "2026-08-01 18:30" → TIMESTAMP | 开赛时间 |
+| status | `matches[].status` | 原样 | -1 完场 / -10 异常 |
+| match_num | `matches[].match_num` | 原样 | 竞彩编号，跨源键 |
+| sclass_id | `matches[].sclass_id` | 原样 | 软关联赛事 |
+| sub_id | `matches[].sub_id` | 原样 | |
+| home_team_id / away_team_id | `matches[].home_team_id / away_team_id` | 原样 | |
+| home_team / away_team | `matches[].home_team / away_team` | 原样 | 简体 |
+| home_team_en / away_team_en | `matches[].home_team_en / away_team_en` | 原样 | 英文（繁体 tw 不落库） |
+| full_score / half_score | `matches[].full_score / half_score` | 原样 | 字符串保真 |
+| home_score / away_score | `matches[].full_score` | "0-3" → 0 / 3 | 拆出整型 |
+
+**说明**：`status` 语义为竞彩侧（-1 完场、-10 异常），与 §六 titan_schedules 的 status（0/1/-1/2）**不同**，两表各自独立，勿混用。`updated_at` 记录导入/刷新时间。

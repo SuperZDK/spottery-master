@@ -1,0 +1,9 @@
+data/analysis/
+data/index/
+data/odds/
+*.bak
+__pycache__/
+*.pyc
+.pytest_cache/
+tmp_check.py
+*.log

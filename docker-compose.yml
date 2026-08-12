@@ -1,0 +1,26 @@
+# Spottery Monorepo —— 数据库服务
+# 单 PG 实例，4 个 database：core / sofascore / titan / sporttery
+# 数据挂载：D:/data/pg/ → /var/lib/postgresql（bind mount，备份脚本可直接访问）
+# 用法：
+#   docker compose up -d db           启动数据库
+#   docker compose down               停止（数据保留）
+#   docker compose down -v            停止并清空（慎用）
+
+services:
+  db:
+    image: postgres:18
+    container_name: spottery-pg
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      PG_APP_PASSWORD: ${PG_APP_PASSWORD:?set PG_APP_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - D:/data/pg:/var/lib/postgresql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped

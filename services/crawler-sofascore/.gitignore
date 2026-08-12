@@ -1,0 +1,7 @@
+node_modules/
+data/
+tmp_*.ts
+tmp_*.cjs
+npx
+tsx
+scripts/import-progress.json

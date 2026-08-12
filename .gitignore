@@ -1,0 +1,30 @@
+# 环境变量（含密钥）
+.env
+*.env.local
+
+# 依赖
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# 构建产物
+dist/
+build/
+
+# 数据目录（各爬虫本地落盘，不随代码迁移）
+data/
+
+# 数据库备份
+backup/
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
