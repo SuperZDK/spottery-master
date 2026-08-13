@@ -157,6 +157,30 @@ def check_matches(date: str) -> tuple:
     return matched, unmatched
 
 
+def _date_already_matched(date: str, sids: list) -> bool:
+    """该日所有 sid 都已在 cross_source_matches 查到对应竞彩 jc_match_id → 已匹配，跳过 mapping。
+
+    任一 sid 缺失 jc_match_id → False（调用方重新调 mapping 补齐）。
+    查询失败 → False（宁多调一次，不阻断）。
+    """
+    if not sids:
+        return False
+    try:
+        conn = db.connect_ro("core", user="api_service")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM cross_source_matches "
+                    "WHERE business_date=%s AND titan_jc_sid = ANY(%s) AND jc_match_id IS NOT NULL",
+                    [date, sids])
+                n = cur.fetchone()[0]
+        finally:
+            conn.close()
+        return n >= len(sids)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # ─── 主流程 ────────────────────────────────────────────────────
 
 def backfill_date(date: str, no_write: bool, skip_mapping: bool, skip_existing: bool = False) -> int:
@@ -207,12 +231,15 @@ def backfill_date(date: str, no_write: bool, skip_mapping: bool, skip_existing: 
         if len(existing) == len(sids):
             log(f"[skip-existing] {date} 全部场次已有 analysis 数据，跳过爬取")
             if not skip_mapping:
-                ok, out = run_mapping(date)
-                log(f"[mapping] run-mapping --date {date} exit_ok={ok}")
-                matched, unmatched = check_matches(date)
-                log(f"[match] {date} cross_source_matches={matched + len(unmatched)} 命中竞彩={matched} 未匹配={len(unmatched)}")
-                for sid in unmatched:
-                    _log_append(UNMATCHED_PATH, f"{date} sid={sid} reason=jc_match_id NULL")
+                if _date_already_matched(date, sids):
+                    log(f"[mapping-skip] {date} 全部场次已匹配竞彩，跳过 mapping")
+                else:
+                    ok, out = run_mapping(date)
+                    log(f"[mapping] run-mapping --date {date} exit_ok={ok}")
+                    matched, unmatched = check_matches(date)
+                    log(f"[match] {date} cross_source_matches={matched + len(unmatched)} 命中竞彩={matched} 未匹配={len(unmatched)}")
+                    for sid in unmatched:
+                        _log_append(UNMATCHED_PATH, f"{date} sid={sid} reason=jc_match_id NULL")
             log(f"===== backfill {date} done {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====")
             _log_append(day_log, "\n".join(log_lines))
             return 0
@@ -247,14 +274,18 @@ def backfill_date(date: str, no_write: bool, skip_mapping: bool, skip_existing: 
 
     # 2) mapping 重建 + 匹配核对
     if not skip_mapping:
-        ok, out = run_mapping(date)
-        log(f"[mapping] run-mapping --date {date} exit_ok={ok}")
-        if not ok:
-            log(f"[mapping] 输出片段: {out[-1500:]}")
-        matched, unmatched = check_matches(date)
-        log(f"[match] {date} cross_source_matches={matched + len(unmatched)} 命中竞彩={matched} 未匹配={len(unmatched)}")
-        for sid in unmatched:
-            _log_append(UNMATCHED_PATH, f"{date} sid={sid} reason=jc_match_id NULL")
+        sids = [m.get("sid") for m in matches]
+        if _date_already_matched(date, sids):
+            log(f"[mapping-skip] {date} 全部场次已匹配竞彩，跳过 mapping")
+        else:
+            ok, out = run_mapping(date)
+            log(f"[mapping] run-mapping --date {date} exit_ok={ok}")
+            if not ok:
+                log(f"[mapping] 输出片段: {out[-1500:]}")
+            matched, unmatched = check_matches(date)
+            log(f"[match] {date} cross_source_matches={matched + len(unmatched)} 命中竞彩={matched} 未匹配={len(unmatched)}")
+            for sid in unmatched:
+                _log_append(UNMATCHED_PATH, f"{date} sid={sid} reason=jc_match_id NULL")
 
     log(f"===== backfill {date} done {dt.datetime.now():%Y-%m-%d %H:%M:%S} =====")
     _log_append(day_log, "\n".join(log_lines))
