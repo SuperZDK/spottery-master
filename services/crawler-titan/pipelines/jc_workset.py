@@ -254,7 +254,10 @@ class JcWorksetService:
             self.ws.set_complete_date(DEFAULT_COMPLETE_DATE)
 
         if self.ws.total_matches() == 0:
-            return self._discovery_cycle(now)
+            # discovery 抓取，可能加入新场次；抓完后只要有场次就立即进入 normal 爬取
+            self._discovery_cycle(now)
+            if self.ws.total_matches() == 0:
+                return self._next_discovery_at(now)
 
         self._normal_cycle(now)
 
