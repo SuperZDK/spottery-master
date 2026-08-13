@@ -186,6 +186,7 @@ class JcWorksetService:
         self.ws = Workset()
         self.running = False
         self.dry_run = dry_run
+        self._new_match_dates = set()   # discovery 新增场次的 business_date，用于触发 workset 匹配
 
     # ─── 生命周期 ────────────────────────────────────────────
 
@@ -252,6 +253,7 @@ class JcWorksetService:
             time.sleep(random.uniform(1.0, 3.0))
         if not self.dry_run:
             self.ws.save()
+        self._run_workset_match()
         return self._next_discovery_at(now)
 
     def _discover_date(self, date: str, now: dt.datetime) -> None:
@@ -302,7 +304,35 @@ class JcWorksetService:
         wm = self.ws.matches_of(m.get("business_date")).get(str(m.get("sid")))
         if wm and not wm.get("first_odds_at"):
             wm["first_odds_at"] = now.isoformat()
+            bd = wm.get("business_date")
+            if bd:
+                self._new_match_dates.add(bd)
         return wm
+
+    # ─── workset 匹配触发 ─────────────────────────────────────
+    def _run_workset_match(self) -> None:
+        """发现新增场次后，调用 mapping 侧 workset 匹配脚本（增量写 cross_source_matches）。"""
+        if not self._new_match_dates:
+            return
+        dates = sorted(self._new_match_dates)
+        self._new_match_dates = set()
+        if self.dry_run:
+            print(f"[workset-match] (dry-run) 新增场次日期 {dates}，跳过")
+            return
+        try:
+            import subprocess
+            monorepo = os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__)))))
+            script = os.path.join(monorepo, "mapping", "scripts", "workset-match.py")
+            r = subprocess.run([sys.executable, script], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=300)
+            print(f"[workset-match] 触发完成 exit={r.returncode} 新增日期={dates}")
+            if r.returncode != 0:
+                print(f"[workset-match] stdout: {(r.stdout or '')[-800:]}")
+                print(f"[workset-match] stderr: {(r.stderr or '')[-800:]}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[workset-match] 触发失败: {e}")
+
 
     # ─── NORMAL ──────────────────────────────────────────────
 

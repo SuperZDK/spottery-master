@@ -1,4 +1,7 @@
 import { Page } from "puppeteer";
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { BrowserPool } from "../../engine/browser-pool.js";
 import { Workset, WorksetMatch } from "./workset.js";
 import { fetchVotes, fetchFixedBonus, gotoHome, recoverPage } from "./api.js";
@@ -6,6 +9,9 @@ import { fetchMissingDetails } from "./details.js";
 import { drainDate, advanceCompleteDate, reconcileCompleteDate, DEFAULT_COMPLETE_DATE } from "./drain.js";
 import { isRefund, isSettled } from "./completeness.js";
 import { MINUTE, formatDate, addDaysStr, parseDate, effectiveStop } from "./time.js";
+
+const MONOREPO = dirname(dirname(dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))));
+const WORKSET_MATCH_SCRIPT = join(MONOREPO, "mapping", "scripts", "workset-match.py");
 
 const ODD_INTERVAL = 30 * MINUTE;
 const VOTE_CONTINUE_INTERVAL = 60 * MINUTE;   // 赛后赛果续抓频率
@@ -217,8 +223,14 @@ export class JingcaiLiveService {
       if (this.ws.hasDate(date)) this.ws.setLastVoteAt(date, now.toISOString());
       return 0;
     }
+    // 记录 upsert 前已有的 matchId，用于检测新增
+    const before = new Set<number>();
+    for (const m of this.ws.matchesOf(date)) before.add(m.matchId);
     this.ws.upsertMatches(merged);
     if (this.ws.hasDate(date)) this.ws.setLastVoteAt(date, now.toISOString());
+    // 检测到新增场次 → 触发 workset 匹配（写 core.cross_source_matches）
+    const added = merged.some((m) => m?.matchId != null && !before.has(m.matchId));
+    if (added) this.runWorksetMatch();
     let appended = 0;
     for (const m of merged) {
       if (this.ws.recordVoteSnapshot(m.matchId, m.businessDate, now.toISOString(), m.had, m.handicap)) appended++;
@@ -242,6 +254,13 @@ export class JingcaiLiveService {
       }
     }
     return merged.length;
+  }
+
+  private runWorksetMatch(): void {
+    execFile("python", [WORKSET_MATCH_SCRIPT], { timeout: 300_000 }, (err) => {
+      if (err) console.error(`[Live] workset 匹配失败: ${err.message}`);
+      else console.log(`[Live] workset 匹配完成`);
+    });
   }
 
   private async pollOdds(m: WorksetMatch, now: Date): Promise<void> {
