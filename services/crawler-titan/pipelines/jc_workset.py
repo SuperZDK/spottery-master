@@ -372,15 +372,24 @@ class JcWorksetService:
         # 1) 赔率：每场独立时间表（T = 开赛时间）
         for date in self.ws.dates():
             for m in list(self.ws.matches_of(date).values()):
+                sid = m.get("sid")
+                label = f"#{sid} {m.get('home_team')} vs {m.get('away_team')} 开赛{m.get('kickoff')}"
                 if is_terminal(m):
+                    print(f"[done] {label} | 已完赛(status={m.get('status')})")
                     continue
                 due = self._next_odds_due(m, now)
-                if due is None or due > now:
+                if due is None:
+                    print(f"[odds] {label} | 时间表已走完，不再轮询")
                     continue
+                if due > now:
+                    wait_min = int((due - now).total_seconds() / 60)
+                    print(f"[odds] {label} | 等待轮询：{due:%H:%M}（{wait_min} 分钟后）")
+                    continue
+                print(f"[odds] {label} | 到点开始抓取")
                 try:
                     self._poll_odds(m, now)
                 except Exception as e:  # noqa: BLE001
-                    print(f"[odds] #{m['sid']} 失败: {e}")
+                    print(f"[odds] #{sid} 失败: {e}")
                     try:
                         playwright_fetcher.close()
                     except Exception:  # noqa: BLE001
