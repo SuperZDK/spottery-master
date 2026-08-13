@@ -25,6 +25,8 @@ analysis / 亚盘+大小球 / 欧赔，直接写 titan 库对应表。
     python scripts/backfill_jc_history.py --date 2026-08-11
     # 断点续跑：该日全部场次已有 analysis 数据则跳过爬取（仅补 mapping）
     python scripts/backfill_jc_history.py --from 2016-01-01 --to 2026-08-11 --skip-existing
+    # 数据库断连重试次数（整日原子重试，默认 3）
+    python scripts/backfill_jc_history.py --date 2026-08-11 --retries 5
     # 调试
     python scripts/backfill_jc_history.py --date 2026-08-11 --no-write
     python scripts/backfill_jc_history.py --date 2026-08-11 --skip-mapping
@@ -183,7 +185,7 @@ def _date_already_matched(date: str, sids: list) -> bool:
 
 # ─── 主流程 ────────────────────────────────────────────────────
 
-def backfill_date(date: str, no_write: bool, skip_mapping: bool, skip_existing: bool = False) -> int:
+def _backfill_date_once(date: str, no_write: bool, skip_mapping: bool, skip_existing: bool = False) -> int:
     _ensure_dir(BACKFILL_DIR)
     global UNMATCHED_PATH
     day_log = os.path.join(BACKFILL_DIR, f"{date}.log")
@@ -292,6 +294,43 @@ def backfill_date(date: str, no_write: bool, skip_mapping: bool, skip_existing: 
     return 0
 
 
+# 数据库断连重试：Windows Docker(9p) 下 PG 会偶发崩溃恢复（connection is lost），
+# 整日单事务保持原子性，commit 失败自动重连重试整日（幂等，ON CONFLICT 安全）。
+_RETRYABLE_MSGS = ("connection is lost", "the connection is closed", "in recovery mode",
+                   "server closed the connection", "connection refused", "SSL connection has been closed")
+
+
+def _is_retryable_conn_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return any(k in s for k in _RETRYABLE_MSGS)
+
+
+def backfill_date(date: str, no_write: bool, skip_mapping: bool, skip_existing: bool = False,
+                  retries: int = 3) -> int:
+    """单日回填 + 数据库断连自动重试。
+
+    保持整日单事务（同日同批导入），PG 崩溃恢复导致的连接断开时自动重连重试整日。
+    幂等：upsert / ON CONFLICT DO NOTHING，重试安全。非连接类错误不重试。
+    """
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            return _backfill_date_once(date, no_write, skip_mapping, skip_existing)
+        except Exception as e:  # noqa: BLE001
+            if not _is_retryable_conn_error(e):
+                raise
+            last_err = e
+            print(f"\n[retry] {date} 数据库连接中断（第 {attempt}/{retries} 次）: {e}")
+            if attempt < retries:
+                wait = 5 * attempt
+                print(f"[retry] {date} {wait}s 后重试整日...")
+                time.sleep(wait)
+    print(f"\n[fail] {date} 重试 {retries} 次仍失败: {last_err}")
+    _log_append(os.path.join(BACKFILL_DIR, f"{date}.log"),
+                f"[fail] 重试 {retries} 次仍失败: {last_err}")
+    return 1
+
+
 def _date_range(from_s: str, to_s: str, asc: bool) -> list:
     """生成 [from, to] 日期列表，默认由今去古（to → from）。"""
     d0 = dt.date.fromisoformat(from_s)
@@ -318,6 +357,8 @@ def main():
     p.add_argument("--skip-mapping", action="store_true", help="跳过 mapping 调用")
     p.add_argument("--skip-existing", action="store_true",
                    help="该日全部场次已有 analysis 数据则跳过爬取（断点续跑）")
+    p.add_argument("--retries", type=int, default=3,
+                   help="数据库断连重试次数（整日原子重试，默认 3）")
     args = p.parse_args()
 
     # 解析区间
@@ -342,11 +383,12 @@ def main():
 
     print(f"===== 历史赛程回填区间 {from_date} ~ {to_date} 共 {len(days)} 天 "
           f"(no_write={args.no_write} skip_mapping={args.skip_mapping} "
-          f"skip_existing={args.skip_existing}) =====")
+          f"skip_existing={args.skip_existing} retries={args.retries}) =====")
     fail_days = 0
     for i, d in enumerate(days, 1):
         print(f"\n[{i}/{len(days)}] {d}")
-        rc = backfill_date(d, args.no_write, args.skip_mapping, args.skip_existing)
+        rc = backfill_date(d, args.no_write, args.skip_mapping, args.skip_existing,
+                           retries=args.retries)
         if rc != 0:
             fail_days += 1
     print(f"\n===== 全部完成：{len(days)} 天，失败 {fail_days} 天 =====")
