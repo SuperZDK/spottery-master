@@ -116,6 +116,20 @@ function dedupeRows(rows: unknown[][], keyIdx: number[]): unknown[][] {
   return [...m.values()];
 }
 
+// votes 行去重：同 (match_id, pool, snapshot_at) 只保留一条，取投票总数最大的
+// voters 位于 VOTE_COLS 索引 16/17/18（voters_home/draw/away）
+function dedupeVoteRows(rows: unknown[][]): unknown[][] {
+  const votersOf = (r: unknown[]): number =>
+    (Number(r[16]) || 0) + (Number(r[17]) || 0) + (Number(r[18]) || 0);
+  const m = new Map<string, unknown[]>();
+  for (const r of rows) {
+    const key = `${r[0]}|${r[1]}|${r[2]}`;
+    const prev = m.get(key);
+    if (!prev || votersOf(r) > votersOf(prev)) m.set(key, r);
+  }
+  return [...m.values()];
+}
+
 async function upsertManyOn(client: pg.PoolClient, sql: string, rows: unknown[][], tail = ""): Promise<void> {
   if (rows.length === 0) return;
   for (let i = 0; i < rows.length; i += BATCH) {
@@ -241,9 +255,10 @@ export async function upsertDailyMatches(matches: any[]): Promise<void> {
   }
 
   if (schedRows.length === 0 && voteRows.length === 0) return;
+  const dedupedVotes = dedupeVoteRows(voteRows);
   await flushWindow([
     { kind: "upsert", sql: `INSERT INTO jingcai_schedules (${SCHED_COLS.join(",")})`, rows: schedRows, tail: SCHED_TAIL },
-    { kind: "upsert", sql: `INSERT INTO jingcai_votes (${VOTE_COLS.join(",")})`, rows: voteRows, tail: VOTE_TAIL },
+    { kind: "upsert", sql: `INSERT INTO jingcai_votes (${VOTE_COLS.join(",")})`, rows: dedupedVotes, tail: VOTE_TAIL },
   ]);
 }
 
@@ -326,8 +341,13 @@ export async function upsertVoteSnapshots(rows: Array<{ matchId: number; at: str
     }
   }
   if (voteRows.length === 0) return;
+
+  // 去重：同 (match_id, pool, snapshot_at) 只保留一条，取投票总数最大的（防止 ON CONFLICT 重复键报错）
+  const deduped = dedupeVoteRows(voteRows);
+  if (deduped.length === 0) return;
+
   await flushWindow([
-    { kind: "upsert", sql: `INSERT INTO jingcai_votes (${VOTE_COLS.join(",")})`, rows: voteRows, tail: VOTE_TAIL },
+    { kind: "upsert", sql: `INSERT INTO jingcai_votes (${VOTE_COLS.join(",")})`, rows: deduped, tail: VOTE_TAIL },
   ]);
 }
 

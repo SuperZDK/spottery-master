@@ -66,7 +66,20 @@ export async function fetchVotes(page: Page, dateStr: string): Promise<any[]> {
   const hadMap = new Map<number, any>();
   for (const m of hadList) hadMap.set(m.matchId, m);
 
-  return hhadList.map((m: any) => {
+  // 按 matchId 去重：同场可能出现多条（接口/分页特性），保留投票总数最大的那条
+  const voteTotal = (m: any): number => {
+    const v = m?.win ?? 0, d = m?.draw ?? 0, l = m?.lose ?? 0;
+    return Number(v) + Number(d) + Number(l);
+  };
+  const best = new Map<number, any>();
+  for (const m of hhadList) {
+    if (!m || m.matchId == null) continue;
+    const prev = best.get(m.matchId);
+    if (!prev || voteTotal(m) > voteTotal(prev)) best.set(m.matchId, m);
+  }
+  const uniqueHhad = [...best.values()];
+
+  return uniqueHhad.map((m: any) => {
     const had = hadMap.get(m.matchId);
     return {
       matchId: m.matchId,
