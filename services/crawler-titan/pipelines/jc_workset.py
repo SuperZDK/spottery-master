@@ -41,7 +41,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import jc_db, jc_parser, playwright_fetcher, sporttery_ref
+from core import db, jc_db, jc_parser, playwright_fetcher, sporttery_ref
 from core.drain import (
     ASIAN_COMPANY, DEFAULT_COMPLETE_DATE, EURO_COMPANY, SUBTYPE,
     advance_complete_date, drain_date,
@@ -192,6 +192,7 @@ class JcWorksetService:
 
     def start(self) -> None:
         self.ws.load()
+        self.reconcile_complete_date()
         if self.ws.complete_date is None:
             self.ws.set_complete_date(DEFAULT_COMPLETE_DATE)
             if not self.dry_run:
@@ -202,6 +203,31 @@ class JcWorksetService:
 
     def stop(self) -> None:
         self.running = False
+
+    def reconcile_complete_date(self) -> None:
+        """启动时把 completeDate 对齐到 titan_jc_schedule 最大 business_date（镜像 sporttery）。
+
+        titan 的排干 gate 看 sporttery.completeDate（外部确认完赛信号）；
+        本函数只同步 titan 自己的进度指针（discovery 起点），两者独立不冲突。
+        """
+        if self.dry_run:
+            return
+        try:
+            conn = db.connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT max(business_date) FROM titan_jc_schedule")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        self.ws.set_complete_date(str(row[0]))
+                        return
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001
+            print(f"[reconcile] 查询失败: {e}")
+        # 兜底：DB 空 / 查询失败时用默认基线
+        if self.ws.complete_date is None:
+            self.ws.set_complete_date(DEFAULT_COMPLETE_DATE)
 
     def loop(self) -> None:
         while self.running:
