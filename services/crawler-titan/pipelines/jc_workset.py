@@ -192,7 +192,6 @@ class JcWorksetService:
 
     def start(self) -> None:
         self.ws.load()
-        self.reconcile_complete_date()
         if self.ws.complete_date is None:
             self.ws.set_complete_date(DEFAULT_COMPLETE_DATE)
             if not self.dry_run:
@@ -247,6 +246,10 @@ class JcWorksetService:
 
     def _cycle(self, now: dt.datetime) -> dt.datetime:
         self.ws.load()
+        # 每次 cycle load 后对齐 DB 最新日期并落盘（防止文件旧值覆盖，保证启动即正确）
+        self.reconcile_complete_date()
+        if not self.dry_run:
+            self.ws.save()
         if self.ws.complete_date is None:
             self.ws.set_complete_date(DEFAULT_COMPLETE_DATE)
 
